@@ -1,6 +1,6 @@
 "use client";
+/* eslint-disable @next/next/no-html-link-for-pages -- Main shell links use native navigation to keep data-heavy section changes immediate and reliable. */
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BrainCircuit, ChevronRight, Circle, Lock, Server } from "lucide-react";
@@ -8,7 +8,6 @@ import { navigation, topbarStatus } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 import { Sparkline } from "@/components/charts/charts";
 import { LiveConnectionBadge, LiveMarketConnector, LivePagePulse, LiveTickerTape } from "@/components/live/LiveMarket";
-import { LayoutPersonalizer } from "@/components/layout/LayoutPersonalizer";
 import { KillSwitchButton } from "@/components/system/KillSwitchButton";
 import { PaperRuntimeHeartbeat } from "@/components/system/PaperRuntimeHeartbeat";
 import { RuntimeRouteAutoRefresh } from "@/components/system/RuntimeRouteAutoRefresh";
@@ -41,10 +40,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       <LiveMarketConnector />
       <PaperRuntimeHeartbeat />
       <RuntimeRouteAutoRefresh />
-      <LayoutPersonalizer key={pathname} />
       <div className="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_20%_0%,rgba(14,165,233,0.18),transparent_30%),radial-gradient(circle_at_85%_10%,rgba(168,85,247,0.12),transparent_28%),linear-gradient(180deg,#06101d_0%,#020713_100%)]" />
       <aside className="fixed left-0 top-0 z-30 flex h-screen w-[244px] flex-col border-r border-[#16314a] bg-[#06111f]/92 px-3 py-5 backdrop-blur-xl">
-        <Link href="/" className="mb-6 flex items-center gap-3 px-3">
+        <a href="/" className="mb-6 flex items-center gap-3 px-3">
           <div className="grid size-11 place-items-center rounded-2xl border border-sky-400/40 bg-sky-500/10 text-sky-300 shadow-[0_0_30px_rgba(14,165,233,0.35)]">
             <BrainCircuit className="size-7" />
           </div>
@@ -52,7 +50,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             <div className="text-lg font-bold text-white">Agent Trader AI</div>
             <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-sky-400">cockpit</div>
           </div>
-        </Link>
+        </a>
 
         <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
           {navigation.map((item) => {
@@ -60,7 +58,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             const locked = item.status === "locked";
             const Icon = item.icon;
             return (
-              <Link
+              <a
                 key={item.href}
                 href={item.href}
                 className={cn(
@@ -73,7 +71,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
                 <Icon className="size-5 shrink-0" />
                 <span className="truncate">{item.label}</span>
                 {locked ? <Lock className="ml-auto size-3.5 text-slate-600 group-hover:text-amber-300" /> : active ? <ChevronRight className="ml-auto size-4 text-sky-300" /> : null}
-              </Link>
+              </a>
             );
           })}
         </nav>

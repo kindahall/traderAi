@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
-import { AIArchitectWorkspace } from "@/components/architect/AIArchitectWorkspace";
+import { StrategiesPage } from "@/components/trading/pages";
 
 export default function Page() {
-  return <AIArchitectWorkspace />;
+  return <StrategiesPage defaultTab="architect" />;
 }

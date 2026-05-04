@@ -31,8 +31,8 @@ import {
   WalletCards,
   XCircle,
 } from "lucide-react";
-import type { Trade } from "@/types/trading";
-import { getAppData } from "@/server/app-data";
+import type { MarketAsset, Trade } from "@/types/trading";
+import { getAppData, type AppDataSnapshot } from "@/server/app-data";
 import { readLocalAnalysisProviderConfig } from "@/server/analysis/local-provider";
 import { readPaperAgentRoutingConfig } from "@/server/paper-trading/agent-routing-store";
 import { readTradingAllocationConfig } from "@/server/trading/allocation-store";
@@ -42,9 +42,11 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checklist, DataTable, DisclaimerBar, FilterBar, GlassCard, InfoHint, KpiCard, MetricGauge, ProgressBar, SectionTitle, StatusBadge, Stepper, Timeline, TogglePill } from "@/components/ui/dashboard";
 import { TabbedContent, TabbedPanel } from "@/components/ui/tabbed-content";
+import { AIArchitectWorkspace } from "@/components/architect/AIArchitectWorkspace";
 import { LLMProviderTabs } from "@/components/llm/LLMProviderTabs";
 import { LLMLiveInsight } from "@/components/llm/LLMLiveInsight";
 import { LiveMarketBoard } from "@/components/live/LiveMarket";
+import { OpenClawRuntimeWorkspace } from "@/components/openclaw/OpenClawRuntimeWorkspace";
 import { SettingsWorkspace } from "@/components/settings/SettingsWorkspace";
 import { KillSwitchButton } from "@/components/system/KillSwitchButton";
 import { LocalActionButton } from "@/components/system/LocalActionButton";
@@ -63,6 +65,24 @@ import { RuleLibraryWorkspace } from "@/components/trading/RuleLibraryWorkspace"
 import { StrategiesWorkspace } from "@/components/trading/StrategiesWorkspace";
 import { TradingDeskChart } from "@/components/trading/TradingDeskChart";
 import { Donut, EquityCurve, HeatmapGrid, MultiLineScores, PerformanceBars, RadarScore, ResultDistribution, Sparkline } from "@/components/charts/charts";
+import { getOpenClawConnectorConfig } from "@/server/openclaw/client";
+import { getOpenClawContextSources } from "@/server/openclaw/context";
+import { readOpenClawRolePolicy } from "@/server/openclaw/policy-store";
+import type { OpenClawRuntimeSnapshot } from "@/types/openclaw";
+
+type StrategiesTab = "library" | "builder" | "backtests" | "architect";
+type JournalTab = "log" | "replay" | "postmortem";
+type RiskTab = "limits" | "alerts" | "rules" | "validation" | "stress" | "kill";
+type SettingsTab = "general" | "llm" | "openclaw";
+type CapitalTab = "progress" | "maturity";
+type RouteTab = {
+  id: string;
+  label: string;
+  href: string;
+  badge?: string;
+  tone?: TruthTone;
+  icon?: React.ReactNode;
+};
 
 function PageActions({ children }: { children: React.ReactNode }) {
   return <div className="mb-4 flex flex-wrap justify-end gap-2">{children}</div>;
@@ -70,6 +90,28 @@ function PageActions({ children }: { children: React.ReactNode }) {
 
 function LockedAction({ children, title = "Action non reliée au backend", ...props }: React.ComponentProps<typeof Button>) {
   return <Button {...props} disabled title={title}>{children}</Button>;
+}
+
+async function buildOpenClawRuntimeSnapshot(): Promise<OpenClawRuntimeSnapshot> {
+  const config = getOpenClawConnectorConfig();
+  const rolePolicy = await readOpenClawRolePolicy();
+  const configured = Boolean(config.gatewayUrl && (config.authMode === "none" || (config.authMode === "token" && config.tokenConfigured) || (config.authMode === "password" && config.passwordConfigured)));
+
+  return {
+    config,
+    status: {
+      state: configured ? "configured" : "missing_config",
+      configured,
+      gatewayUrl: config.gatewayUrl,
+      authMode: config.authMode,
+      defaultAgentId: config.defaultAgentId,
+      message: configured ? "Configuration prête à tester" : "Configuration OpenClaw incomplète",
+    },
+    agents: [],
+    rolePolicy,
+    dataSources: getOpenClawContextSources(),
+    logs: [],
+  };
 }
 
 function CardTitle({ icon, title, action, hint }: { icon?: React.ReactNode; title: string; action?: React.ReactNode; hint?: React.ReactNode }) {
@@ -107,6 +149,36 @@ function TruthStrip({ items }: { items: Array<[string, string, TruthTone]> }) {
       {items.map(([label, value, tone]) => (
         <StatusBadge key={`${label}-${value}`} tone={tone}>{label} · {value}</StatusBadge>
       ))}
+    </div>
+  );
+}
+
+function RouteTabs({ activeId, tabs }: { activeId: string; tabs: RouteTab[] }) {
+  return (
+    <div className="mb-4 rounded-2xl border border-[#16314a] bg-slate-950/60 p-2 shadow-[0_18px_48px_rgba(0,0,0,0.22)] backdrop-blur-xl">
+      <div className="flex gap-2 overflow-x-auto" role="tablist">
+        {tabs.map((tab) => {
+          const selected = tab.id === activeId;
+
+          return (
+            <Link
+              aria-selected={selected}
+              className={cn(
+                "inline-flex h-11 shrink-0 items-center gap-2 rounded-xl border px-3 text-sm font-semibold transition",
+                selected ? "border-sky-400/70 bg-sky-500/18 text-white shadow-[0_0_22px_rgba(14,165,233,0.16)]" : "border-transparent bg-white/[0.025] text-slate-300 hover:border-sky-400/40 hover:text-sky-100",
+              )}
+              href={tab.href}
+              key={tab.id}
+              prefetch={false}
+              role="tab"
+            >
+              {tab.icon ? <span className="shrink-0 text-sky-300">{tab.icon}</span> : null}
+              <span>{tab.label}</span>
+              {tab.badge ? <StatusBadge className="px-1.5 py-0.5" tone={tab.tone ?? "neutral"}>{tab.badge}</StatusBadge> : null}
+            </Link>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -403,6 +475,49 @@ function AgentPreview() {
   return <div className="space-y-4"><GlassCard><CardTitle title="Aperçu de l'agent" /><div className="flex items-center gap-3"><div className="grid size-20 place-items-center rounded-full border border-sky-400/50 bg-sky-500/10 text-5xl">🦊</div><div><div className="text-xl font-bold text-white">Alpha-02</div><StatusBadge tone="success">Nouveau</StatusBadge><p className="mt-2 text-sm text-slate-400">Scanner, Analyste · Paper Trading · Crypto</p></div></div><Tags items={["Volatilité", "Momentum", "Court terme"]} /></GlassCard><GlassCard><CardTitle title="Score de discipline estimé" /><div className="flex items-center justify-between"><div className="font-mono text-3xl font-bold text-white">76<span className="text-base text-slate-500">/100</span></div><Donut value={76} colors={["#8b5cf6"]} /></div><div className="space-y-3"><SliderRow label="Gestion du risque" value={82} tone="success" /><SliderRow label="Cohérence" value={71} tone="ai" /><SliderRow label="Adaptabilité" value={74} tone="info" /></div></GlassCard><GlassCard><CardTitle title="Compatibilité système" /><Checklist items={[{ label: "Ressources suffisantes", status: "ok" }, { label: "Stratégie compatible", status: "ok" }, { label: "Règles de risque", status: "ok" }, { label: "Permissions valides", status: "ok" }]} /></GlassCard><GlassCard><CardTitle title="Résumé de lancement" /><FieldRows rows={[["Mode", "Paper Trading"], ["Capital virtuel", "10 000,00 $"], ["Date de création", "24 mai 2025 09:23"], ["Statut", <StatusBadge key="ready" tone="success">Prêt à créer</StatusBadge>]]} /></GlassCard></div>;
 }
 
+function StrategyBuilderPanel({ marketAssets, priceSeries, llmRoleCount }: { marketAssets: MarketAsset[]; priceSeries: Array<{ price: number }>; llmRoleCount: number }) {
+  return (
+    <div className="grid grid-cols-[1fr_320px] items-start gap-4">
+      <TabbedContent
+        tabs={[
+          { id: "base", label: "Base", badge: "3 blocs", tone: "info", icon: <SlidersHorizontal className="size-4" /> },
+          { id: "rules", label: "Règles", badge: "entrée/sortie", tone: "ai", icon: <Target className="size-4" /> },
+          { id: "risk", label: "Risque", badge: "filtres", tone: "warning", icon: <Shield className="size-4" /> },
+          { id: "validation", label: "Actifs & test", badge: `${marketAssets.length}`, tone: "success", icon: <CheckCircle2 className="size-4" /> },
+        ]}
+      >
+        <TabbedPanel id="base">
+          <div className="grid grid-cols-3 gap-4">
+            <FormBox index={1} title="Identité de la stratégie"><TextInput label="Nom" value="Breakout Momentum Pro" /><TextInput label="Description" value="Breakout avec confirmation momentum et risque dynamique." /><Tags items={["breakout", "momentum", "trend"]} /></FormBox>
+            <FormBox index={2} title="Type & objectif"><Tags items={["Trend Following", "Mean Reversion", "Breakout", "Scalping", "Arbitrage", "Custom"]} tone="ai" /><TextInput label="Objectif" value="Maximiser rendement ajusté au risque" /></FormBox>
+            <FormBox index={3} title="Marché & unités de temps"><Tags items={["Crypto", "Spot/Perp", "1h", "4h", "24/7"]} /><TextInput label="Fréquence de risque" value="Élevée" /></FormBox>
+          </div>
+        </TabbedPanel>
+        <TabbedPanel id="rules">
+          <div className="grid grid-cols-[1fr_320px] gap-4">
+            <FormBox index={4} title="Règles d'entrée"><DataTable headers={["#", "Indicateur", "Opérateur", "Valeur"]} rows={["Prix clôture au-dessus EMA 50", "RSI supérieur à 55", "MACD au-dessus signal", "Volume > SMA 20", "Breakout plus haut 20 périodes", "Aucune actualité majeure"].map((rule, index) => [index + 1, rule, "ET", <XCircle key={rule} className="size-4 text-red-300" />])} /></FormBox>
+            <FormBox index={5} title="Règles de sortie"><Tags items={["Prix sous EMA 50", "RSI < 45", "Take-profit 2,5R", "Temps max 48h", "Stop-loss atteint"]} tone="danger" /></FormBox>
+          </div>
+        </TabbedPanel>
+        <TabbedPanel id="risk">
+          <div className="grid grid-cols-2 gap-4">
+            <FormBox index={6} title="Gestion du risque"><FieldRows rows={[["Stop-loss", "ATR x 1,8"], ["Take-profit", "ATR x 3,0"], ["Risque/trade", "1,0 %"], ["Positions max", "3"], ["Risque quotidien", "4,0 %"]]} /></FormBox>
+            <FormBox index={7} title="Filtres & conditions"><div className="space-y-2"><ToggleRow label="Tendance de fond EMA 200" /><ToggleRow label="Volatilité ATR" /><ToggleRow label="Volume minimum" /><ToggleRow label="Éviter annonces majeures" /></div></FormBox>
+          </div>
+        </TabbedPanel>
+        <TabbedPanel id="validation">
+          <div className="grid grid-cols-3 gap-4">
+            <FormBox index={8} title="Actifs autorisés"><div className="space-y-2">{marketAssets.slice(0, 6).map((asset) => <ToggleRow key={asset.symbol} label={asset.symbol} active={asset.authorized} />)}</div></FormBox>
+            <FormBox index={9} title="Validation & test"><TextInput label="Données historiques" value="2 dernières années" /><TextInput label="Frais" value="0,10 %" /><TextInput label="Slippage" value="0,05 %" /><TextInput label="Capital initial" value="10 000 USDT" /></FormBox>
+            <FormBox index={10} title="Notes & IA"><div className="space-y-3 text-sm text-slate-300"><div className="flex items-center gap-2">Rôles LLM configurés<StatusBadge tone="ai">{llmRoleCount}</StatusBadge></div><div className="flex items-center gap-2">Recommandations<InfoHint content="Ajouter un filtre corrélation BTC, tester une sortie partielle à 1,5R, surveiller performances sur 30m." /></div></div></FormBox>
+          </div>
+        </TabbedPanel>
+      </TabbedContent>
+      <GlassCard><CardTitle title="Aperçu de la stratégie" /><FieldRows rows={[["Taux de réussite estimé", <span key="w" className="text-emerald-300">64,3%</span>], ["Rendement / Risque", <span key="r" className="text-violet-300">2,67</span>], ["Drawdown max cible", <span key="d" className="text-red-300">{signed(-8.21, "%")}</span>], ["Score global", "81/100"]]} /><Donut value={81} colors={["#8b5cf6"]} /><Checklist items={[{ label: "Marché crypto", status: "ok" }, { label: "Tendance haussière", status: "ok" }, { label: "Volatilité moyenne", status: "ok" }, { label: "Compatibilité Alpha-01", status: "ok" }]} /><Sparkline data={priceSeries.slice(-18)} color="#8b5cf6" /></GlassCard>
+    </div>
+  );
+}
+
 export async function MarketsPage() {
   const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
 
@@ -416,95 +531,64 @@ export async function MarketsPage() {
   );
 }
 
-export async function StrategiesPage() {
+export async function StrategiesPage({ defaultTab = "library" }: { defaultTab?: StrategiesTab } = {}) {
   const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
+  const allocation = await readTradingAllocationConfig();
+  const recommended = marketAssets
+    .filter((asset) => asset.price > 0 && asset.price < 1 && asset.authorized)
+    .toSorted((a, b) => (b.confidence + b.volatility) - (a.confidence + a.volatility))[0] ?? marketAssets[0];
 
   return (
     <>
-      <SectionTitle title="Bibliothèque de stratégies" subtitle="Comparez, activez et auditez les stratégies utilisées par les agents." icon={<Target />} />
-      <TruthStrip items={[["Stratégies", "runtime local", "success"], ["Activation", "persistée", "success"], ["Métriques", "journal paper", "success"], ["Backtests", "page dédiée", "info"]]} />
-      <StrategiesWorkspace strategies={strategies} priceSeries={priceSeries} strategyComparison={strategyComparison} metrics={metrics} />
+      <SectionTitle title="Stratégies" subtitle="Un seul espace pour choisir, créer, auditer et tester les stratégies." icon={<Target />} />
+      <TruthStrip items={[["Bibliothèque", "runtime local", "success"], ["Builder", "intégré", "info"], ["Backtests", recommended?.symbol ?? metrics.market.primarySymbol, "warning"], ["Architecte IA", "intégré", "ai"]]} />
+      <RouteTabs
+        activeId={defaultTab}
+        tabs={[
+          { id: "library", label: "Bibliothèque", href: "/strategies", badge: `${strategies.length}`, tone: "success", icon: <Target className="size-4" /> },
+          { id: "builder", label: "Créer", href: "/strategies/new", badge: "builder", tone: "info", icon: <Plus className="size-4" /> },
+          { id: "backtests", label: "Backtests", href: "/backtests", badge: recommended?.symbol ?? "simulation", tone: "warning", icon: <LineChart className="size-4" /> },
+          { id: "architect", label: "Architecte IA", href: "/ai-architect", badge: "Codex", tone: "ai", icon: <BrainCircuit className="size-4" /> },
+        ]}
+      />
+      {defaultTab === "library" ? <StrategiesWorkspace strategies={strategies} priceSeries={priceSeries} strategyComparison={strategyComparison} metrics={metrics} /> : null}
+      {defaultTab === "builder" ? <StrategyBuilderPanel marketAssets={marketAssets} priceSeries={priceSeries} llmRoleCount={llmRoleConfig.length} /> : null}
+      {defaultTab === "backtests" ? <BacktestsWorkspace marketAssets={marketAssets} priceSeries={priceSeries} monthlyHeatmap={monthlyHeatmap} resultDistribution={resultDistribution} strategies={strategies} trades={trades} metrics={metrics} sourceStatus={sourceStatus} paperAllocation={allocation.paper} /> : null}
+      {defaultTab === "architect" ? <AIArchitectWorkspace /> : null}
       <DisclaimerBar items={DISCLAIMERS} />
     </>
   );
 }
 
 export async function NewStrategyPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  return (
-    <>
-      <SectionTitle title="Nouvelle stratégie" subtitle="Builder complet : identité, règles, risque, validation et recommandations IA." icon={<SlidersHorizontal />} />
-      <TruthStrip items={[["Builder", "prérempli local", "warning"], ["Backtest", "page dédiée", "info"], ["Création", "pas d'API persistante", "neutral"], ["Live", "verrouillé", "danger"]]} />
-      <PageActions><Link href="/strategies"><Button variant="ghost">Annuler</Button></Link><LocalActionButton actionLabel="Brouillon stratégie" variant="ghost">Enregistrer brouillon local</LocalActionButton><Link href="/backtests"><Button variant="ai">Lancer un backtest</Button></Link><LocalActionButton actionLabel="Stratégie préparée localement">Préparer localement</LocalActionButton></PageActions>
-      <div className="mt-4 grid grid-cols-[1fr_320px] items-start gap-4">
-        <TabbedContent
-          tabs={[
-            { id: "base", label: "Base", badge: "3 blocs", tone: "info", icon: <SlidersHorizontal className="size-4" /> },
-            { id: "rules", label: "Règles", badge: "entrée/sortie", tone: "ai", icon: <Target className="size-4" /> },
-            { id: "risk", label: "Risque", badge: "filtres", tone: "warning", icon: <Shield className="size-4" /> },
-            { id: "validation", label: "Actifs & test", badge: "3 blocs", tone: "success", icon: <CheckCircle2 className="size-4" /> },
-          ]}
-        >
-          <TabbedPanel id="base">
-            <div className="grid grid-cols-3 gap-4">
-              <FormBox index={1} title="Identité de la stratégie"><TextInput label="Nom" value="Breakout Momentum Pro" /><TextInput label="Description" value="Breakout avec confirmation momentum et risque dynamique." /><Tags items={["breakout", "momentum", "trend"]} /></FormBox>
-              <FormBox index={2} title="Type & objectif"><Tags items={["Trend Following", "Mean Reversion", "Breakout", "Scalping", "Arbitrage", "Custom"]} tone="ai" /><TextInput label="Objectif" value="Maximiser rendement ajusté au risque" /></FormBox>
-              <FormBox index={3} title="Marché & unités de temps"><Tags items={["Crypto", "Spot/Perp", "1h", "4h", "24/7"]} /><TextInput label="Fréquence de risque" value="Élevée" /></FormBox>
-            </div>
-          </TabbedPanel>
-          <TabbedPanel id="rules">
-            <div className="grid grid-cols-[1fr_320px] gap-4">
-              <FormBox index={4} title="Règles d'entrée"><DataTable headers={["#", "Indicateur", "Opérateur", "Valeur"]} rows={["Prix clôture au-dessus EMA 50", "RSI supérieur à 55", "MACD au-dessus signal", "Volume > SMA 20", "Breakout plus haut 20 périodes", "Aucune actualité majeure"].map((r, i) => [i + 1, r, i < 2 ? "ET" : "ET", <XCircle key={r} className="size-4 text-red-300" />])} /></FormBox>
-              <FormBox index={5} title="Règles de sortie"><Tags items={["Prix sous EMA 50", "RSI < 45", "Take-profit 2,5R", "Temps max 48h", "Stop-loss atteint"]} tone="danger" /></FormBox>
-            </div>
-          </TabbedPanel>
-          <TabbedPanel id="risk">
-            <div className="grid grid-cols-2 gap-4">
-              <FormBox index={6} title="Gestion du risque"><FieldRows rows={[["Stop-loss", "ATR x 1,8"], ["Take-profit", "ATR x 3,0"], ["Risque/trade", "1,0 %"], ["Positions max", "3"], ["Risque quotidien", "4,0 %"]]} /></FormBox>
-              <FormBox index={7} title="Filtres & conditions"><div className="space-y-2"><ToggleRow label="Tendance de fond EMA 200" /><ToggleRow label="Volatilité ATR" /><ToggleRow label="Volume minimum" /><ToggleRow label="Éviter annonces majeures" /></div></FormBox>
-            </div>
-          </TabbedPanel>
-          <TabbedPanel id="validation">
-            <div className="grid grid-cols-3 gap-4">
-              <FormBox index={8} title="Actifs autorisés"><div className="space-y-2">{marketAssets.slice(0, 6).map((a) => <ToggleRow key={a.symbol} label={a.symbol} active={a.authorized} />)}</div></FormBox>
-              <FormBox index={9} title="Validation & test"><TextInput label="Données historiques" value="2 dernières années" /><TextInput label="Frais" value="0,10 %" /><TextInput label="Slippage" value="0,05 %" /><TextInput label="Capital initial" value="10 000 USDT" /></FormBox>
-              <FormBox index={10} title="Notes & recommandations IA"><div className="flex items-center gap-2 text-sm text-slate-300">3 recommandations<InfoHint content="Ajouter un filtre corrélation avec BTC, tester une sortie partielle à 1,5R, surveiller performances sur 30m." /></div></FormBox>
-            </div>
-          </TabbedPanel>
-        </TabbedContent>
-        <GlassCard><CardTitle title="Aperçu de la stratégie" /><FieldRows rows={[["Taux de réussite estimé", <span key="w" className="text-emerald-300">64,3%</span>], ["Rendement / Risque", <span key="r" className="text-violet-300">2,67</span>], ["Drawdown max cible", <span key="d" className="text-red-300">{signed(-8.21, "%")}</span>], ["Score global", "81/100"]]} /><Donut value={81} colors={["#8b5cf6"]} /><Checklist items={[{ label: "Marché crypto", status: "ok" }, { label: "Tendance haussière", status: "ok" }, { label: "Volatilité moyenne", status: "ok" }, { label: "Compatibilité Alpha-01", status: "ok" }]} /></GlassCard>
-      </div>
-    </>
-  );
+  return <StrategiesPage defaultTab="builder" />;
 }
 
 export async function BacktestsPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-  const allocation = await readTradingAllocationConfig();
-  const recommended = marketAssets
-    .filter((asset) => asset.price > 0 && asset.price < 1 && asset.authorized)
-    .toSorted((a, b) => (b.confidence + b.volatility) - (a.confidence + a.volatility))[0] ?? marketAssets[0];
-  return (
-    <>
-      <SectionTitle title="Backtests & simulation" subtitle="Tester une stratégie historiquement sans confondre simulation et garantie future." icon={<LineChart />} />
-      <TruthStrip items={[["Backtest", "simulation snapshot", "warning"], ["Actif recommandé", recommended?.symbol ?? metrics.market.primarySymbol, recommended?.price && recommended.price < 1 ? "success" : "warning"], ["Données démo", sourceStatus.demoData, sourceStatus.demoData === "off" ? "success" : "danger"], ["Live", "aucun ordre réel", "success"]]} />
-      <PageActions><Link href="/strategies"><Button variant="ghost">Retour stratégies</Button></Link><Link href="/strategies/new"><Button variant="ghost">Configurer stratégie</Button></Link><LocalActionButton actionLabel="Fenêtre backtest" variant="ghost"><CalendarDays className="size-4" /> Fenêtre locale</LocalActionButton><LocalActionButton actionLabel="Rapport backtest" variant="ghost"><Download className="size-4" /> Export local</LocalActionButton></PageActions>
-      <BacktestsWorkspace marketAssets={marketAssets} priceSeries={priceSeries} monthlyHeatmap={monthlyHeatmap} resultDistribution={resultDistribution} strategies={strategies} trades={trades} metrics={metrics} sourceStatus={sourceStatus} paperAllocation={allocation.paper} />
-    </>
-  );
+  return <StrategiesPage defaultTab="backtests" />;
 }
 
-export async function JournalPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, paperEvents, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
+export async function JournalPage({ defaultTab = "log", initialTradeId }: { defaultTab?: JournalTab; initialTradeId?: string } = {}) {
+  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, paperEvents, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, paperRuntime, killSwitch, dataMode, metrics } = await getAppData();
+  const snapshot: AppDataSnapshot = { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, paperEvents, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, paperRuntime, killSwitch, dataMode, metrics };
 
   return (
     <>
-      <SectionTitle title="Journal de trading" subtitle="Historique complet des trades, raisonnements et décisions auditables." icon={<FileText />} />
-      <PageActions><Link href="/decision-replay"><Button variant="ghost"><Play className="size-4" /> Replay</Button></Link><Link href="/weekly-postmortem"><Button variant="ghost">Post-mortem</Button></Link><PageRefreshButton /><Link href="/api/paper-trading/state"><Button variant="ghost"><Download className="size-4" /> État runtime</Button></Link></PageActions>
+      <SectionTitle title="Journal" subtitle="Historique, replay de décision et post-mortem hebdomadaire dans un seul fil." icon={<FileText />} />
+      <PageActions><PageRefreshButton /><Link href="/api/paper-trading/state"><Button variant="ghost"><Download className="size-4" /> État runtime</Button></Link></PageActions>
       <div className="grid grid-cols-5 gap-4"><KpiCard label="Décisions journalisées" value={`${metrics.trade.total}`} delta={`${metrics.trade.open} ordres ouverts`} tone="info" /><KpiCard label="Signaux non ouverts" value={`${metrics.trade.refused}`} delta="bloqués ou ignorés" tone={metrics.trade.refused ? "warning" : "success"} /><KpiCard label="P&L latent" value={signed(metrics.trade.unrealizedPnl, " $")} delta={`réalisé ${signed(metrics.trade.pnlTotal, " $")}`} tone={metrics.trade.unrealizedPnl >= 0 ? "success" : "danger"} /><KpiCard label="Erreurs critiques" value={`${metrics.risk.criticalAlerts}`} delta={`${metrics.risk.activeAlerts} alertes actives`} tone={metrics.risk.criticalAlerts ? "danger" : "success"} /><KpiCard label="Qualité décisions" value={`${metrics.trade.averageDiscipline}/100`} delta="discipline moyenne" tone="ai"><Donut value={metrics.trade.averageDiscipline} colors={["#8b5cf6"]} /></KpiCard></div>
       <TruthStrip items={[["Journal", "paper-runtime", "success"], ["Données démo", sourceStatus.demoData, sourceStatus.demoData === "off" ? "success" : "danger"], ["Événements", `${paperEvents.length}`, paperEvents.length ? "info" : "warning"], ["Export", "JSON local/runtime", "success"]]} />
-      <JournalWorkspace trades={trades} priceSeries={priceSeries} replaySteps={replaySteps} riskRules={riskRules} riskLimits={riskLimits} paperEvents={paperEvents} />
+      <RouteTabs
+        activeId={defaultTab}
+        tabs={[
+          { id: "log", label: "Journal", href: "/journal", badge: `${metrics.trade.total}`, tone: "info", icon: <FileText className="size-4" /> },
+          { id: "replay", label: "Replay", href: "/decision-replay", badge: trades[0]?.asset ?? "vide", tone: trades.length ? "success" : "warning", icon: <Play className="size-4" /> },
+          { id: "postmortem", label: "Post-mortem", href: "/weekly-postmortem", badge: `${metrics.weekly.analyzed} trades`, tone: "ai", icon: <ClipboardCheck className="size-4" /> },
+        ]}
+      />
+      {defaultTab === "log" ? <JournalWorkspace trades={trades} priceSeries={priceSeries} replaySteps={replaySteps} riskRules={riskRules} riskLimits={riskLimits} paperEvents={paperEvents} /> : null}
+      {defaultTab === "replay" ? (trades.length ? <DecisionReplayWorkspace initialTradeId={initialTradeId} trades={trades} replaySteps={replaySteps} marketMetrics={metrics.market} riskMetrics={metrics.risk} sourceStatus={sourceStatus} /> : <GlassCard><CardTitle title="Aucun trade disponible" /><StatusBadge tone="warning">Runtime paper en attente</StatusBadge></GlassCard>) : null}
+      {defaultTab === "postmortem" ? <WeeklyPostmortemPanel data={snapshot} /> : null}
     </>
   );
 }
@@ -513,7 +597,34 @@ function TradeDetail({ selected, priceSeries, replaySteps }: { selected: Trade; 
   return <div className="space-y-4"><GlassCard><CardTitle title="Détail du trade sélectionné" action={<StatusBadge tone="success">Gagnant</StatusBadge>} /><div className="flex items-center justify-between"><div><div className="text-xl font-bold text-white">{selected.asset}</div><StatusBadge tone="success">{selected.side}</StatusBadge></div><div className="font-mono text-2xl text-emerald-300">{signed(selected.pnl, " $")}</div></div><FieldRows rows={[["Entrée", selected.entry], ["Sortie", selected.exit], ["Durée", "01:12:48"], ["Date", `${selected.date} ${selected.time}`]]} /></GlassCard><GlassCard><CardTitle title="Aperçu live avec niveaux" /><div className="grid grid-cols-2 gap-3"><MetricGauge value={selected.confidence} label="Confiance" tone="info" /><FieldRows rows={[["Risque/trade", `${selected.riskPercent}%`], ["Exposition", "6,50%"], ["R:R estimé", "2,6:1"]]} /></div><TradingDeskChart compact symbol={selected.asset} trades={[selected]} riskPercent={selected.riskPercent} title={`${selected.asset} · replay niveaux`} /></GlassCard><GlassCard><CardTitle title="Chaîne de raisonnement" /><Timeline items={replaySteps.slice(0, 5).map((s) => ({ time: s.time, title: s.title, detail: s.detail, tone: "success" }))} /></GlassCard><GlassCard><CardTitle title="Checklist / post-mortem / leçons" /><Checklist items={[{ label: "Tendance alignée", status: "ok" }, { label: "Volume confirmé", status: "ok" }, { label: "Risque < 1%", status: "ok" }, { label: "Entrée un peu anticipée", status: "warning" }]} /><div className="mt-4 flex items-center gap-2 text-sm text-slate-300">Leçon<InfoHint content={selected.lesson} /></div><Link href={`/decision-replay?trade=${encodeURIComponent(selected.id)}`}><Button className="mt-4 w-full" variant="ghost">Rejouer la décision</Button></Link></GlassCard></div>;
 }
 
-export async function RiskPage() {
+function WeeklyPostmortemPanel({ data }: { data: AppDataSnapshot }) {
+  const { monthlyHeatmap, strategies, weeklyBars, weeklyLessons, metrics } = data;
+
+  return (
+    <TabbedContent
+      tabs={[
+        { id: "summary", label: "Résumé", badge: `${metrics.weekly.analyzed} trades`, tone: "info", icon: <ClipboardCheck className="size-4" /> },
+        { id: "lessons", label: "Leçons", badge: "5 axes", tone: "ai", icon: <BrainCircuit className="size-4" /> },
+        { id: "performance", label: "Performance", badge: signed(metrics.weekly.netPerformance, "%"), tone: metrics.weekly.netPerformance >= 0 ? "success" : "danger", icon: <LineChart className="size-4" /> },
+      ]}
+    >
+      <TabbedPanel id="summary">
+        <div className="space-y-4">
+          <div className="grid grid-cols-6 gap-4"><KpiCard label="Trades analysés" value={`${metrics.weekly.analyzed}`} delta={`${metrics.trade.closed} clos`} tone="info" /><KpiCard label="Gagnants / perdants" value={`${metrics.weekly.winners} / ${metrics.weekly.losers}`} delta={`${formatPercent(metrics.trade.winRate, 1)} réussite`} tone="success" /><KpiCard label="Trades évités correctement" value={`${metrics.weekly.avoided}`} delta={`${metrics.weekly.avoidedQuality}% qualité`} tone="success" /><KpiCard label="Violations" value={`${metrics.weekly.violations}`} delta={`${metrics.risk.activeAlerts} alertes`} tone={metrics.weekly.violations ? "danger" : "success"} /><KpiCard label="Leçon principale" value="Risque" delta={metrics.weekly.mainLesson} tone="ai" /><KpiCard label="Performance nette" value={signed(metrics.weekly.netPerformance, "%")} delta={signed(metrics.trade.pnlTotal, " $")} tone={metrics.weekly.netPerformance >= 0 ? "success" : "danger"} /></div>
+          <div className="grid grid-cols-[1fr_1fr_300px] gap-4"><GlassCard><CardTitle title="Résumé hebdomadaire" hint={metrics.weekly.mainLesson} /><Tags items={["Discipline améliorée", "Meilleure gestion du risque", "Moins de FOMO", "Fatigue identifiée le soir"]} /></GlassCard><GlassCard><CardTitle title="Résultats journaliers" /><PerformanceBars data={weeklyBars} /></GlassCard><GlassCard><CardTitle title="Résumé exécutif" /><FieldRows rows={[["Performance nette", <span key="p" className={metrics.weekly.netPerformance >= 0 ? "text-emerald-300" : "text-red-300"}>{signed(metrics.weekly.netPerformance, "%")}</span>], ["Trades analysés", `${metrics.weekly.analyzed}`], ["Gagnants / perdants", `${metrics.weekly.winners} / ${metrics.weekly.losers}`], ["Max drawdown", <span key="d" className="text-red-300">{formatPercent(metrics.risk.drawdownPercent)}</span>], ["Conformité", <span key="c" className="text-emerald-300">{formatPercent(metrics.risk.conformityPercent, 0)}</span>]]} /></GlassCard></div>
+        </div>
+      </TabbedPanel>
+      <TabbedPanel id="lessons">
+        <div className="grid grid-cols-5 gap-4"><GlassCard><CardTitle title="Ce qui a bien fonctionné" /><Timeline items={weeklyLessons.worked.map((item) => ({ title: item, tone: "success" }))} /></GlassCard><GlassCard><CardTitle title="Ce qui a moins bien fonctionné" /><Timeline items={weeklyLessons.failed.map((item) => ({ title: item, tone: "warning" }))} /></GlassCard><GlassCard><CardTitle title="Erreurs répétées" /><Timeline items={weeklyLessons.repeated.map((item) => ({ title: item, tone: "danger" }))} /></GlassCard><GlassCard><CardTitle title="Ajustements proposés" /><Timeline items={weeklyLessons.adjustments.map((item) => ({ title: item, tone: "info" }))} /></GlassCard><GlassCard><CardTitle title="Règles à renforcer" />{["Gestion du risque", "Entrée", "Sortie", "Gestion émotionnelle", "Respect du plan"].map((rule, index) => <div className="mb-3" key={rule}><SliderRow label={rule} value={[90, 78, 72, 65, 85][index]} tone="ai" /></div>)}</GlassCard></div>
+      </TabbedPanel>
+      <TabbedPanel id="performance">
+        <div className="grid grid-cols-[1fr_1fr_300px] gap-4"><GlassCard><CardTitle title="Performance par jour / heure" /><HeatmapGrid values={monthlyHeatmap} /></GlassCard><GlassCard><CardTitle title="Stratégies à activer / désactiver" action={<Link href="/strategies"><Button size="sm" variant="ghost">Ouvrir</Button></Link>} /><DataTable headers={["Stratégie", "Statut", "Performance", "Recommandation"]} rows={strategies.map((strategy) => [strategy.name, <StatusBadge key={strategy.id} tone={strategy.status === "active" ? "success" : "neutral"}>{strategy.status}</StatusBadge>, <span key={`${strategy.id}-p`} className={strategy.performance >= 0 ? "text-emerald-300" : "text-red-300"}>{signed(strategy.performance, "%")}</span>, <StatusBadge key={`${strategy.id}-action`} tone={strategy.performance < 0 ? "danger" : "info"}>{strategy.performance < 0 ? "Désactiver" : "Conserver"}</StatusBadge>])} /></GlassCard><GlassCard><CardTitle title="Meilleure / pire décision" /><div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-3"><div className="font-bold text-emerald-300">Meilleure décision</div><p className="text-sm text-slate-300">{metrics.weekly.bestTrade?.asset ?? "-"} · {signed(metrics.weekly.bestTrade?.pnl ?? 0, " $")}</p></div><div className="mt-3 rounded-2xl border border-red-500/20 bg-red-500/8 p-3"><div className="font-bold text-red-300">Pire décision</div><p className="text-sm text-slate-300">{metrics.weekly.worstTrade?.asset ?? "-"} · {signed(metrics.weekly.worstTrade?.pnl ?? 0, " $")}</p></div></GlassCard></div>
+      </TabbedPanel>
+    </TabbedContent>
+  );
+}
+
+export async function RiskPage({ defaultTab = "limits" }: { defaultTab?: RiskTab } = {}) {
   const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
   const exposureLimitReached = metrics.risk.exposureLimit > 0 && metrics.risk.exposurePercent >= metrics.risk.exposureLimit;
   const exposureNearLimit = metrics.risk.exposureLimit > 0 && metrics.risk.exposurePercent >= metrics.risk.exposureLimit * 0.8;
@@ -530,76 +641,88 @@ export async function RiskPage() {
 
   return (
     <>
-      <SectionTitle title="Gestion du risque" subtitle="Surveillance en temps réel et protection du capital." icon={<Shield />} />
-      <TruthStrip items={[["Limites", "runtime paper", "success"], ["Règles", "config locale", "warning"], ["Kill switch", sourceStatus.killSwitch, sourceStatus.killSwitch === "inactive" ? "success" : "danger"], ["Live", "bloqué", "danger"]]} />
-      <PageActions><Link href="/alerts"><Button variant="ghost"><Bell className="size-4" /> Alertes</Button></Link><Link href="/rules"><Button variant="ghost"><BookOpenCheck className="size-4" /> Règles</Button></Link><Link href="/human-validation"><Button variant="ghost"><UserCheck className="size-4" /> Validation</Button></Link><Link href="/crisis-simulator"><Button variant="ghost"><Gauge className="size-4" /> Stress test</Button></Link><Link href="/capital-progress"><Button>Progression capital</Button></Link></PageActions>
+      <SectionTitle title="Risque" subtitle="Limites, alertes, règles, validations et stress tests dans un seul poste de contrôle." icon={<Shield />} />
+      <TruthStrip items={[["Limites", "runtime paper", "success"], ["Alertes", `${metrics.risk.activeAlerts}`, metrics.risk.activeAlerts ? "warning" : "success"], ["Kill switch", sourceStatus.killSwitch, sourceStatus.killSwitch === "inactive" ? "success" : "danger"], ["Live", "bloqué", "danger"]]} />
+      <PageActions><Link href="/capital-progress"><Button>Progression capital</Button></Link></PageActions>
       <div className="grid grid-cols-5 gap-4"><KpiCard label="Perte quotidienne utilisée" value={formatPercent(metrics.risk.dailyRiskPercent)} delta={`sur ${metrics.risk.dailyRiskLimit}% limite`} tone={metrics.risk.dailyRiskPercent > metrics.risk.dailyRiskLimit * 0.7 ? "warning" : "success"}><Donut value={Math.round((metrics.risk.dailyRiskPercent / Math.max(metrics.risk.dailyRiskLimit, 1)) * 100)} colors={["#22c55e"]} /></KpiCard><KpiCard label="Drawdown actuel" value={formatPercent(metrics.risk.drawdownPercent)} delta={`sur ${metrics.risk.drawdownLimit}% limite`} tone="danger"><Sparkline data={priceSeries.slice(-18)} color="#ef4444" /></KpiCard><KpiCard label="Exposition totale" value={formatPercent(metrics.risk.exposurePercent)} delta={`sur ${metrics.risk.exposureLimit}% limite`} tone={exposureLimitReached ? "danger" : exposureNearLimit ? "warning" : "info"}><Donut value={Math.round(exposureGaugeValue)} /></KpiCard><KpiCard label="Conformité des règles" value={formatPercent(metrics.risk.conformityPercent, 0)} delta={`${metrics.risk.activeRules}/${riskRules.length} règles actives`} tone="success" /><KpiCard label="Alertes actives" value={`${metrics.risk.activeAlerts}`} delta="Voir le flux" tone={metrics.risk.activeAlerts ? "warning" : "success"} icon={<Bell />} /></div>
-      <TabbedContent
-        className="mt-4"
+      <RouteTabs
+        activeId={defaultTab}
         tabs={[
-          { id: "limits", label: "Limites", badge: `${riskLimits.length}`, tone: "success", icon: <Shield className="size-4" /> },
-          { id: "rules", label: "Règles", badge: `${metrics.risk.activeRules}`, tone: "info", icon: <BookOpenCheck className="size-4" /> },
-          { id: "scenario", label: "Scénario", badge: metrics.crisis.selected.severity, tone: "warning", icon: <Gauge className="size-4" /> },
-          { id: "kill", label: "Kill switch", badge: sourceStatus.killSwitch, tone: sourceStatus.killSwitch === "inactive" ? "success" : "danger", icon: <Siren className="size-4" /> },
+          { id: "limits", label: "Limites", href: "/risk", badge: `${riskLimits.length}`, tone: "success", icon: <Shield className="size-4" /> },
+          { id: "alerts", label: "Alertes", href: "/alerts", badge: `${metrics.alert.active}`, tone: metrics.alert.active ? "warning" : "success", icon: <Bell className="size-4" /> },
+          { id: "rules", label: "Règles", href: "/rules", badge: `${metrics.risk.activeRules}`, tone: "info", icon: <BookOpenCheck className="size-4" /> },
+          { id: "validation", label: "Validation", href: "/human-validation", badge: `${metrics.validation.pending}`, tone: metrics.validation.pending ? "warning" : "success", icon: <UserCheck className="size-4" /> },
+          { id: "stress", label: "Stress test", href: "/crisis-simulator", badge: metrics.crisis.selected.severity, tone: "warning", icon: <Gauge className="size-4" /> },
+          { id: "kill", label: "Kill switch", href: "/risk?tab=kill", badge: sourceStatus.killSwitch, tone: sourceStatus.killSwitch === "inactive" ? "success" : "danger", icon: <Siren className="size-4" /> },
         ]}
-      >
-        <TabbedPanel id="limits">
-          <div className="grid grid-cols-[1fr_1fr_0.8fr] gap-4">
-            <GlassCard><CardTitle title="Vue d'ensemble du risque" />{riskLimits.map((limit) => <div className="mb-4" key={limit.label}><SliderRow label={`${limit.label} ${limit.current}/${limit.limit}${limit.unit}`} value={(limit.current / limit.limit) * 100} tone={limit.current >= limit.limit ? "danger" : limit.current > limit.limit * 0.7 ? "warning" : "success"} /></div>)}</GlassCard>
-            <GlassCard><CardTitle title="Exposition par actif" /><DataTable headers={["Actif", "% capital"]} rows={exposureRows} /><CardTitle title="Concentration & corrélation" /><MetricGauge value={exposureGaugeValue} label={exposureLimitReached ? "Limite atteinte" : exposureNearLimit ? "Surveillée" : "Contrôlée"} tone={exposureLimitReached ? "danger" : exposureNearLimit ? "warning" : "success"} /></GlassCard>
-            <LiveMarketBoard limit={4} />
-          </div>
-        </TabbedPanel>
-        <TabbedPanel id="rules">
-          <GlassCard><CardTitle title="Moteur de règles (Guardrails)" action={<Link href="/rules"><Button size="sm" variant="ghost">Gérer règles</Button></Link>} /><DataTable headers={["Règle", "Description", "Statut", "Source"]} rows={riskRules.slice(0, 8).map((r) => [r.name, r.description, <StatusBadge key={r.id} tone="success">ACTIF</StatusBadge>, <StatusBadge key={`${r.id}-source`} tone="warning">config locale</StatusBadge>])} /></GlassCard>
-        </TabbedPanel>
-        <TabbedPanel id="scenario">
-          <GlassCard><CardTitle title="Analyse de scénarios" /><FieldRows rows={[["Scénario", metrics.crisis.selected.name], ["P&L estimé", <span key="p" className="text-red-300">{signed(metrics.crisis.selected.impact, "%")}</span>], ["Robustesse", `${metrics.crisis.selected.robustness}/100`], ["Exposition impactée", marketAssets.slice(0, 3).map((asset) => asset.symbol).join(", ")], ["Probabilité", metrics.crisis.selected.severity]]} /><Link href="/crisis-simulator"><Button className="mt-4 w-full">Lancer un test</Button></Link></GlassCard>
-        </TabbedPanel>
-        <TabbedPanel id="kill">
-          <GlassCard className="border-red-500/40"><CardTitle icon={<Siren />} title="Kill Switch / Arrêt automatique" /><StatusBadge tone={sourceStatus.killSwitch === "active" ? "danger" : "success"}>{sourceStatus.killSwitch === "active" ? "ACTIF" : "VEILLE"}</StatusBadge><FieldRows rows={[["Perte quotidienne ≥", `${metrics.risk.dailyRiskLimit}%`], ["Drawdown ≥", `${metrics.risk.drawdownLimit}%`], ["Risque/trade ≥", `${metrics.risk.tradeRiskLimit}%`], ["Alertes critiques ≥", `${metrics.risk.criticalAlerts}`]]} /><KillSwitchButton className="mt-4 w-full" size="md" /></GlassCard>
-        </TabbedPanel>
-      </TabbedContent>
+      />
+      {defaultTab === "limits" ? (
+        <div className="grid grid-cols-[1fr_1fr_0.8fr] gap-4">
+          <GlassCard><CardTitle title="Vue d'ensemble du risque" />{riskLimits.map((limit) => <div className="mb-4" key={limit.label}><SliderRow label={`${limit.label} ${limit.current}/${limit.limit}${limit.unit}`} value={(limit.current / limit.limit) * 100} tone={limit.current >= limit.limit ? "danger" : limit.current > limit.limit * 0.7 ? "warning" : "success"} /></div>)}</GlassCard>
+          <GlassCard><CardTitle title="Exposition par actif" /><DataTable headers={["Actif", "% capital"]} rows={exposureRows} /><CardTitle title="Concentration & corrélation" /><MetricGauge value={exposureGaugeValue} label={exposureLimitReached ? "Limite atteinte" : exposureNearLimit ? "Surveillée" : "Contrôlée"} tone={exposureLimitReached ? "danger" : exposureNearLimit ? "warning" : "success"} /></GlassCard>
+          <LiveMarketBoard limit={4} />
+        </div>
+      ) : null}
+      {defaultTab === "alerts" ? (alerts.length ? <AlertCenterWorkspace alerts={alerts} dailyRiskPercent={metrics.risk.dailyRiskPercent} /> : <GlassCard><CardTitle title="Flux d'alertes" /><StatusBadge tone="success">Aucune alerte opérationnelle</StatusBadge></GlassCard>) : null}
+      {defaultTab === "rules" ? <RuleLibraryWorkspace rules={riskRules} alerts={alerts} riskLimits={riskLimits} /> : null}
+      {defaultTab === "validation" ? (validationRequests.length ? <HumanValidationWorkspace requests={validationRequests} trades={trades} riskPercent={metrics.risk.tradeRiskPercent} /> : <GlassCard><CardTitle title="File de validation" /><StatusBadge tone="success">Aucune validation humaine en attente</StatusBadge><div className="mt-4 grid grid-cols-3 gap-3"><KpiCard label="Approuvés paper" value={`${metrics.trade.closed}`} delta="trades clos" tone="success" /><KpiCard label="Refusés" value={`${metrics.trade.refused}`} delta="moteur risque" tone="danger" /><KpiCard label="Trades sensibles" value="0" delta="aucun" tone="success" /></div></GlassCard>) : null}
+      {defaultTab === "stress" ? <CrisisSimulatorWorkspace scenarios={crisisScenarios} timeline={crisisTimeline} metrics={metrics.crisis} killSwitchStatus={sourceStatus.killSwitch} /> : null}
+      {defaultTab === "kill" ? <GlassCard className="border-red-500/40"><CardTitle icon={<Siren />} title="Kill Switch / Arrêt automatique" /><StatusBadge tone={sourceStatus.killSwitch === "active" ? "danger" : "success"}>{sourceStatus.killSwitch === "active" ? "ACTIF" : "VEILLE"}</StatusBadge><FieldRows rows={[["Perte quotidienne ≥", `${metrics.risk.dailyRiskLimit}%`], ["Drawdown ≥", `${metrics.risk.drawdownLimit}%`], ["Risque/trade ≥", `${metrics.risk.tradeRiskLimit}%`], ["Alertes critiques ≥", `${metrics.risk.criticalAlerts}`]]} /><KillSwitchButton className="mt-4 w-full" size="md" /></GlassCard> : null}
       <DisclaimerBar items={DISCLAIMERS} />
     </>
   );
 }
 
-export async function SettingsPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
+export async function SettingsPage({ defaultTab = "general" }: { defaultTab?: SettingsTab } = {}) {
+  const [data, openClawSnapshot] = await Promise.all([getAppData(), buildOpenClawRuntimeSnapshot()]);
+  const { agents, llmRoleConfig, riskLimits, sourceStatus, metrics } = data;
 
   return (
     <>
-      <SectionTitle title="Paramètres" subtitle="Configurez environnement, agent, sécurité, données, apparence et sauvegardes." icon={<SlidersHorizontal />} />
-      <TruthStrip items={[["Env", "lecture serveur", "info"], ["Sauvegarde", "partielle runtime", "warning"], ["Secrets", "non exposés", "success"], ["Actions réglages", "locales", "info"]]} />
-      <PageActions><Link href="/llm-providers"><Button variant="ghost"><BrainCircuit className="size-4" /> LLM</Button></Link><Link href="/openclaw"><Button variant="ghost">OpenClaw</Button></Link></PageActions>
-      <SettingsWorkspace agents={agents} llmRoleConfig={llmRoleConfig} metrics={metrics} riskLimits={riskLimits} sourceStatus={sourceStatus} />
+      <SectionTitle title="Paramètres" subtitle="Configuration générale, providers IA et OpenClaw regroupés au même endroit." icon={<SlidersHorizontal />} />
+      <TruthStrip items={[["Env", "lecture serveur", "info"], ["LLM", sourceStatus.llm, sourceStatus.llm === "connected" ? "success" : "warning"], ["OpenClaw", openClawSnapshot.status.state, openClawSnapshot.status.configured ? "success" : "warning"], ["Secrets", "non exposés", "success"]]} />
+      <RouteTabs
+        activeId={defaultTab}
+        tabs={[
+          { id: "general", label: "Général", href: "/settings", badge: "runtime", tone: "info", icon: <SlidersHorizontal className="size-4" /> },
+          { id: "llm", label: "LLM", href: "/llm-providers", badge: `${metrics.llm.connectedProviders}/${metrics.llm.totalProviders}`, tone: sourceStatus.llm === "connected" ? "success" : "warning", icon: <BrainCircuit className="size-4" /> },
+          { id: "openclaw", label: "OpenClaw", href: "/openclaw", badge: openClawSnapshot.status.state, tone: openClawSnapshot.status.configured ? "success" : "warning", icon: <Cloud className="size-4" /> },
+        ]}
+      />
+      {defaultTab === "general" ? <SettingsWorkspace agents={agents} llmRoleConfig={llmRoleConfig} metrics={metrics} riskLimits={riskLimits} sourceStatus={sourceStatus} /> : null}
+      {defaultTab === "llm" ? <LLMProvidersPanel data={data} /> : null}
+      {defaultTab === "openclaw" ? <OpenClawRuntimeWorkspace initialSnapshot={openClawSnapshot} /> : null}
     </>
   );
 }
 
-export async function CapitalProgressPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
+export async function CapitalProgressPage({ defaultTab = "progress" }: { defaultTab?: CapitalTab } = {}) {
+  const data = await getAppData();
+  const { priceSeries, sourceStatus, metrics } = data;
 
   return (
     <>
-      <SectionTitle title="Capital & progression" subtitle="Allocation progressive et gates de validation pour une montée maîtrisée." icon={<WalletCards />} />
-      <TruthStrip items={[["Capital", "paliers configurés", "info"], ["Promotion", "gates manuelles", "warning"], ["Live", sourceStatus.trading, sourceStatus.trading === "live-enabled" ? "danger" : "success"], ["Risque", "runtime paper", "success"]]} />
-      <PageActions><Link href="/maturity"><Button variant="ghost"><ShieldCheck className="size-4" /> Maturité</Button></Link><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link></PageActions>
-      <CapitalProgressWorkspace metrics={metrics} priceSeries={priceSeries} sourceStatus={sourceStatus} />
+      <SectionTitle title="Capital & progression" subtitle="Paliers de capital et maturité de l'agent dans le même chemin de décision." icon={<WalletCards />} />
+      <TruthStrip items={[["Capital", "paliers configurés", "info"], ["Maturité", `${metrics.maturity.globalScore}/100`, metrics.maturity.globalScore >= 75 ? "success" : "warning"], ["Live", sourceStatus.trading, sourceStatus.trading === "live-enabled" ? "danger" : "success"], ["Risque", "runtime paper", "success"]]} />
+      <PageActions><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link></PageActions>
+      <RouteTabs
+        activeId={defaultTab}
+        tabs={[
+          { id: "progress", label: "Progression", href: "/capital-progress", badge: metrics.capital.current.label, tone: "info", icon: <WalletCards className="size-4" /> },
+          { id: "maturity", label: "Maturité", href: "/maturity", badge: `${metrics.maturity.globalScore}/100`, tone: metrics.maturity.globalScore >= 75 ? "success" : "warning", icon: <ShieldCheck className="size-4" /> },
+        ]}
+      />
+      {defaultTab === "progress" ? <CapitalProgressWorkspace metrics={metrics} priceSeries={priceSeries} sourceStatus={sourceStatus} /> : null}
+      {defaultTab === "maturity" ? <MaturityPanel data={data} /> : null}
     </>
   );
 }
 
-export async function MaturityPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
+function MaturityPanel({ data }: { data: AppDataSnapshot }) {
+  const { priceSeries, maturityScores, scoreEvolution, metrics } = data;
 
   return (
-    <>
-      <SectionTitle title="Évaluation & maturité de l'agent" subtitle="Score pondéré pour décider si l'agent mérite plus de capital." icon={<ShieldCheck />} />
-      <TruthStrip items={[["Maturité", "score pondéré local", "info"], ["Promotion", "recommandation seulement", "warning"], ["Profit", "pondéré 10%", "success"], ["Export", "local", "info"]]} />
-      <PageActions><Link href="/capital-progress"><Button variant="ghost">Capital & progression</Button></Link><Link href="/weekly-postmortem"><Button variant="ghost">Post-mortem</Button></Link><LocalActionButton actionLabel="Rapport maturité"><Download className="size-4" /> Export local</LocalActionButton></PageActions>
-      <TabbedContent
+    <TabbedContent
         tabs={[
           { id: "summary", label: "Synthèse", badge: `${metrics.maturity.globalScore}/100`, tone: metrics.maturity.globalScore >= 75 ? "success" : "warning", icon: <ShieldCheck className="size-4" /> },
           { id: "profile", label: "Profil", badge: `${maturityScores.length}`, tone: "ai", icon: <Target className="size-4" /> },
@@ -620,156 +743,43 @@ export async function MaturityPage() {
           <div className="grid grid-cols-3 gap-4"><GlassCard><CardTitle title="Maturité globale" /><div className="text-2xl font-bold text-amber-300">Bonne mais prudence</div><div className="mt-2 flex items-center gap-2 text-sm text-slate-300">Synthèse<InfoHint content="Comportement globalement solide. Poursuivre paper trading avec surveillance ciblée." /></div><CardTitle title="Checklist" /><Checklist items={[{ label: "Limites de risque", status: "ok" }, { label: "Discipline", status: "ok" }, { label: "Gestion pertes", status: "ok" }, { label: "Stabilité résultats", status: "warning" }, { label: "Patience", status: "warning" }]} /></GlassCard><GlassCard><CardTitle title="Méthodologie & pondérations" /><FieldRows rows={maturityScores.slice(0, 5).map((s) => [s.subject, <ProgressBar key={s.subject} value={s.weight} max={30} tone={s.subject === "Profit" ? "warning" : "ai"} />])} /><div className="mt-3 flex items-center gap-2 text-sm text-slate-300">Pondération<InfoHint content="Le profit n'est pas le critère dominant." /></div></GlassCard><GlassCard><CardTitle title="Décision recommandée" /><div className="space-y-3"><StatusBadge tone="info">{metrics.maturity.readiness}</StatusBadge><StatusBadge tone="neutral">Prochain palier : {metrics.capital.next?.label ?? "aucun"}</StatusBadge><StatusBadge tone={metrics.risk.activeAlerts ? "danger" : "success"}>{metrics.risk.activeAlerts ? "Risque à résoudre" : "Risque stable"}</StatusBadge></div></GlassCard></div>
         </TabbedPanel>
       </TabbedContent>
-    </>
   );
+}
+
+export async function MaturityPage() {
+  return <CapitalProgressPage defaultTab="maturity" />;
 }
 
 export async function WeeklyPostmortemPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  return (
-    <>
-      <SectionTitle title="Post-mortem hebdomadaire" subtitle="Analyse complète des performances, décisions et apprentissages de la semaine." icon={<ClipboardCheck />} />
-      <TruthStrip items={[["Post-mortem", "calculé runtime", "info"], ["Actions stratégie", "recommandations", "warning"], ["Export", "local", "info"], ["Données démo", sourceStatus.demoData, sourceStatus.demoData === "off" ? "success" : "danger"]]} />
-      <PageActions><Link href="/journal"><Button variant="ghost">Voir journal</Button></Link><Link href="/maturity"><Button variant="ghost">Évaluation maturité</Button></Link><Link href="/strategies"><Button variant="ghost">Stratégies</Button></Link><LocalActionButton actionLabel="Post-mortem"><Download className="size-4" /> Export local</LocalActionButton></PageActions>
-      <TabbedContent
-        tabs={[
-          { id: "summary", label: "Résumé", badge: `${metrics.weekly.analyzed} trades`, tone: "info", icon: <ClipboardCheck className="size-4" /> },
-          { id: "lessons", label: "Leçons", badge: "5 axes", tone: "ai", icon: <BrainCircuit className="size-4" /> },
-          { id: "performance", label: "Performance", badge: signed(metrics.weekly.netPerformance, "%"), tone: metrics.weekly.netPerformance >= 0 ? "success" : "danger", icon: <LineChart className="size-4" /> },
-        ]}
-      >
-        <TabbedPanel id="summary">
-          <div className="space-y-4">
-            <div className="grid grid-cols-6 gap-4"><KpiCard label="Trades analysés" value={`${metrics.weekly.analyzed}`} delta={`${metrics.trade.closed} clos`} tone="info" /><KpiCard label="Gagnants / perdants" value={`${metrics.weekly.winners} / ${metrics.weekly.losers}`} delta={`${formatPercent(metrics.trade.winRate, 1)} réussite`} tone="success" /><KpiCard label="Trades évités correctement" value={`${metrics.weekly.avoided}`} delta={`${metrics.weekly.avoidedQuality}% qualité`} tone="success" /><KpiCard label="Violations" value={`${metrics.weekly.violations}`} delta={`${metrics.risk.activeAlerts} alertes`} tone={metrics.weekly.violations ? "danger" : "success"} /><KpiCard label="Leçon principale" value="Risque" delta={metrics.weekly.mainLesson} tone="ai" /><KpiCard label="Performance nette" value={signed(metrics.weekly.netPerformance, "%")} delta={signed(metrics.trade.pnlTotal, " $")} tone={metrics.weekly.netPerformance >= 0 ? "success" : "danger"} /></div>
-            <div className="grid grid-cols-[1fr_1fr_300px] gap-4"><GlassCard><CardTitle title="Résumé hebdomadaire" hint={metrics.weekly.mainLesson} /><Tags items={["Discipline améliorée", "Meilleure gestion du risque", "Moins de FOMO", "Fatigue identifiée le soir"]} /></GlassCard><GlassCard><CardTitle title="Résultats journaliers" /><PerformanceBars data={weeklyBars} /></GlassCard><GlassCard><CardTitle title="Résumé exécutif" /><FieldRows rows={[["Performance nette", <span key="p" className={metrics.weekly.netPerformance >= 0 ? "text-emerald-300" : "text-red-300"}>{signed(metrics.weekly.netPerformance, "%")}</span>], ["Trades analysés", `${metrics.weekly.analyzed}`], ["Gagnants / perdants", `${metrics.weekly.winners} / ${metrics.weekly.losers}`], ["Max drawdown", <span key="d" className="text-red-300">{formatPercent(metrics.risk.drawdownPercent)}</span>], ["Conformité", <span key="c" className="text-emerald-300">{formatPercent(metrics.risk.conformityPercent, 0)}</span>]]} /></GlassCard></div>
-          </div>
-        </TabbedPanel>
-        <TabbedPanel id="lessons">
-          <div className="grid grid-cols-5 gap-4"><GlassCard><CardTitle title="Ce qui a bien fonctionné" /><Timeline items={weeklyLessons.worked.map((x) => ({ title: x, tone: "success" }))} /></GlassCard><GlassCard><CardTitle title="Ce qui a moins bien fonctionné" /><Timeline items={weeklyLessons.failed.map((x) => ({ title: x, tone: "warning" }))} /></GlassCard><GlassCard><CardTitle title="Erreurs répétées" /><Timeline items={weeklyLessons.repeated.map((x) => ({ title: x, tone: "danger" }))} /></GlassCard><GlassCard><CardTitle title="Ajustements proposés" /><Timeline items={weeklyLessons.adjustments.map((x) => ({ title: x, tone: "info" }))} /></GlassCard><GlassCard><CardTitle title="Règles à renforcer" />{["Gestion du risque", "Entrée", "Sortie", "Gestion émotionnelle", "Respect du plan"].map((r, i) => <div className="mb-3" key={r}><SliderRow label={r} value={[90, 78, 72, 65, 85][i]} tone="ai" /></div>)}</GlassCard></div>
-        </TabbedPanel>
-        <TabbedPanel id="performance">
-          <div className="grid grid-cols-[1fr_1fr_300px] gap-4"><GlassCard><CardTitle title="Performance par jour / heure" /><HeatmapGrid values={monthlyHeatmap} /></GlassCard><GlassCard><CardTitle title="Stratégies à activer / désactiver" action={<Link href="/strategies"><Button size="sm" variant="ghost">Ouvrir</Button></Link>} /><DataTable headers={["Stratégie", "Statut", "Performance", "Recommandation"]} rows={strategies.map((s) => [s.name, <StatusBadge key={s.id} tone={s.status === "active" ? "success" : "neutral"}>{s.status}</StatusBadge>, <span key={`${s.id}-p`} className={s.performance >= 0 ? "text-emerald-300" : "text-red-300"}>{signed(s.performance, "%")}</span>, <StatusBadge key={`${s.id}-action`} tone={s.performance < 0 ? "danger" : "info"}>{s.performance < 0 ? "Désactiver" : "Conserver"}</StatusBadge>])} /></GlassCard><GlassCard><CardTitle title="Meilleure / pire décision" /><div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-3"><div className="font-bold text-emerald-300">Meilleure décision</div><p className="text-sm text-slate-300">{metrics.weekly.bestTrade?.asset ?? "-"} · {signed(metrics.weekly.bestTrade?.pnl ?? 0, " $")}</p></div><div className="mt-3 rounded-2xl border border-red-500/20 bg-red-500/8 p-3"><div className="font-bold text-red-300">Pire décision</div><p className="text-sm text-slate-300">{metrics.weekly.worstTrade?.asset ?? "-"} · {signed(metrics.weekly.worstTrade?.pnl ?? 0, " $")}</p></div></GlassCard></div>
-        </TabbedPanel>
-      </TabbedContent>
-    </>
-  );
+  return <JournalPage defaultTab="postmortem" />;
 }
 
 export async function CrisisSimulatorPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  return (
-    <>
-      <SectionTitle title="Simulateur de crise" subtitle="Laboratoire de stress-tests pour évaluer la résilience face aux scénarios extrêmes." icon={<Gauge />} />
-      <TruthStrip items={[["Simulation", "snapshot scénario", "warning"], ["Sélection", "client connectée", "success"], ["Ordres", "aucun ordre réel", "success"], ["Kill switch", sourceStatus.killSwitch, sourceStatus.killSwitch === "inactive" ? "success" : "danger"]]} />
-      <PageActions><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link><Link href="/alerts"><Button variant="ghost">Alertes</Button></Link></PageActions>
-      <CrisisSimulatorWorkspace scenarios={crisisScenarios} timeline={crisisTimeline} metrics={metrics.crisis} killSwitchStatus={sourceStatus.killSwitch} />
-    </>
-  );
+  return <RiskPage defaultTab="stress" />;
 }
 
 export async function DecisionReplayPage({ initialTradeId }: { initialTradeId?: string } = {}) {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  const selected = trades[0];
-  if (!selected) {
-    return (
-      <>
-        <SectionTitle title="Replay de décision" subtitle="Revivez pas à pas ce que l'agent a vu, compris, décidé et fait." icon={<Activity />} />
-        <PageActions><Link href="/journal"><Button variant="ghost">Retour journal</Button></Link></PageActions>
-        <GlassCard><CardTitle title="Aucun trade disponible" /><StatusBadge tone="warning">Runtime paper en attente</StatusBadge></GlassCard>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <SectionTitle title="Replay de décision" subtitle="Revivez pas à pas ce que l'agent a vu, compris, décidé et fait." icon={<Activity />} />
-      <TruthStrip items={[["Replay", initialTradeId ? "trade URL" : "trade par défaut", initialTradeId ? "success" : "warning"], ["Sélection trade", "client connectée", "success"], ["Commandes", "étape active", "info"], ["Export", "JSON local", "info"]]} />
-      <PageActions><Link href="/journal"><Button variant="ghost">Retour journal</Button></Link></PageActions>
-      <DecisionReplayWorkspace initialTradeId={initialTradeId} trades={trades} replaySteps={replaySteps} marketMetrics={metrics.market} riskMetrics={metrics.risk} sourceStatus={sourceStatus} />
-    </>
-  );
+  return <JournalPage defaultTab="replay" initialTradeId={initialTradeId} />;
 }
 
 export async function AlertsPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  const selected = alerts[0];
-  if (!selected) {
-    return (
-      <>
-        <SectionTitle title="Centre d'alertes" subtitle="Surveillance centralisée des incidents et actions requises." icon={<Bell />} />
-        <PageActions><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link><Link href="/rules"><Button variant="ghost">Règles</Button></Link><LockedAction variant="ghost">Exporter</LockedAction><LockedAction variant="ghost">Paramètres d'alertes</LockedAction></PageActions>
-        <div className="grid grid-cols-6 gap-4"><KpiCard label="Alertes actives" value="0" delta="runtime sain" tone="success" icon={<Bell />} /><KpiCard label="Critiques" value="0" delta="aucune" tone="success" /><KpiCard label="Avertissements" value="0" delta="aucun" tone="success" /><KpiCard label="Incidents API" value="0" delta={sourceStatus.market} tone="info" icon={<Cloud />} /><KpiCard label="Trades refusés" value={`${metrics.trade.refused}`} delta="moteur risque" tone="danger" icon={<XCircle />} /><KpiCard label="Actions requises" value="0" delta="aucune" tone="success" /></div>
-        <GlassCard className="mt-4"><CardTitle title="Flux d'alertes" /><StatusBadge tone="success">Aucune alerte opérationnelle</StatusBadge></GlassCard>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <SectionTitle title="Centre d'alertes" subtitle="Surveillance centralisée des incidents et actions requises." icon={<Bell />} />
-      <PageActions><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link><Link href="/rules"><Button variant="ghost">Règles</Button></Link><LocalActionButton actionLabel="Paramètres alertes" variant="ghost">Paramètres locaux</LocalActionButton></PageActions>
-      <div className="grid grid-cols-6 gap-4"><KpiCard label="Alertes actives" value={`${metrics.alert.active}`} delta={`${metrics.alert.total} total`} tone="warning" icon={<Bell />} /><KpiCard label="Critiques" value={`${metrics.alert.critical}`} delta={`${metrics.alert.criticalShare}% du flux`} tone="danger" icon={<AlertTriangle />} /><KpiCard label="Avertissements" value={`${metrics.alert.warning}`} delta={`${metrics.alert.warningShare}% du flux`} tone="warning" /><KpiCard label="Incidents API" value={`${metrics.alert.apiIncidents}`} delta={sourceStatus.market} tone="ai" icon={<Cloud />} /><KpiCard label="Trades refusés" value={`${metrics.trade.refused}`} delta="moteur risque" tone="danger" icon={<XCircle />} /><KpiCard label="Actions requises" value={`${metrics.alert.actionRequired}`} delta={`${metrics.alert.pending} en attente`} tone="info" /></div>
-      <AlertCenterWorkspace alerts={alerts} dailyRiskPercent={metrics.risk.dailyRiskPercent} />
-    </>
-  );
+  return <RiskPage defaultTab="alerts" />;
 }
 
 export async function RulesPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  return (
-    <>
-      <SectionTitle title="Bibliothèque de règles" subtitle="Règles de risque et garde-fous comportementaux réutilisables." icon={<BookOpenCheck />} />
-      <PageActions><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Risque</Button></Link><Link href="/alerts"><Button variant="ghost"><Bell className="size-4" /> Alertes</Button></Link></PageActions>
-      <div className="grid grid-cols-6 gap-4"><KpiCard label="Règles actives" value={`${metrics.rules.active}`} delta={`${metrics.rules.total} total`} tone="success" /><KpiCard label="Règles critiques" value={`${metrics.rules.critical}`} delta={`${metrics.rules.warning} warning`} tone="danger" /><KpiCard label="Couverture agents" value={`${metrics.rules.coveredAgents}`} delta={`${metrics.rules.coveredStrategies} stratégies`} tone="success" /><KpiCard label="Conformité runtime" value={formatPercent(metrics.risk.conformityPercent, 0)} delta={`${metrics.risk.activeAlerts} alerte(s)`} tone={metrics.risk.activeAlerts ? "warning" : "success"} /><KpiCard label="Exposition" value={formatPercent(metrics.risk.exposurePercent)} delta={`limite ${metrics.risk.exposureLimit}%`} tone={metrics.risk.exposurePercent >= metrics.risk.exposureLimit ? "danger" : "info"} /><KpiCard label="Mode édition" value="OFF" delta="lecture seule" tone="neutral" /></div>
-      <TruthStrip items={[["Règles", "config locale", "warning"], ["Risk Engine", "déterministe", "success"], ["Alertes", `${metrics.risk.activeAlerts}`, metrics.risk.activeAlerts ? "warning" : "success"], ["Édition", "verrouillée", "neutral"]]} />
-      <RuleLibraryWorkspace rules={riskRules} alerts={alerts} riskLimits={riskLimits} />
-    </>
-  );
+  return <RiskPage defaultTab="rules" />;
 }
 
 export async function HumanValidationPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
-  if (!validationRequests.length) {
-    return (
-      <>
-        <SectionTitle title="Validation humaine" subtitle="Examinez et validez les propositions de trades sensibles." icon={<UserCheck />} />
-        <PageActions><Link href="/risk"><Button variant="ghost">Risque</Button></Link><Link href="/journal"><Button variant="ghost">Journal</Button></Link></PageActions>
-        <div className="grid grid-cols-6 gap-4"><KpiCard label="En attente" value="0" delta="aucune proposition sensible" tone="success" /><KpiCard label="Approuvés (24h)" value={`${metrics.trade.closed}`} delta="trades clos paper" tone="success" /><KpiCard label="Refusés" value={`${metrics.trade.refused}`} delta="moteur risque" tone="danger" /><KpiCard label="Expirés" value="0" delta="aucun" tone="success" /><KpiCard label="Temps moyen réponse" value="-" delta="pas de file active" tone="neutral" /><KpiCard label="Trades sensibles" value="0" delta="aucun" tone="success" /></div>
-        <GlassCard className="mt-4"><CardTitle title="File de validation" /><StatusBadge tone="success">Aucune validation humaine en attente</StatusBadge></GlassCard>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <SectionTitle title="Validation humaine" subtitle="Examinez et validez les propositions de trades sensibles." icon={<UserCheck />} />
-      <TruthStrip items={[["File", "runtime/reference", "warning"], ["Actions", "session locale", "info"], ["API validation", "à brancher", "neutral"], ["Live", "aucun ordre réel", "success"]]} />
-      <PageActions><Link href="/risk"><Button variant="ghost">Risque</Button></Link><Link href="/journal"><Button variant="ghost">Journal</Button></Link></PageActions>
-      <div className="grid grid-cols-6 gap-4"><KpiCard label="En attente" value={`${metrics.validation.pending}`} delta={`${metrics.validation.amountTotal.toFixed(0)} $ notionnel`} tone="info" /><KpiCard label="Approuvés (24h)" value={`${metrics.trade.closed}`} delta="trades clos audités" tone="success" /><KpiCard label="Refusés (24h)" value={`${metrics.trade.refused}`} delta="moteur risque" tone="danger" /><KpiCard label="Expirés (24h)" value={`${metrics.alert.pending}`} delta="alertes en attente" tone="warning" /><KpiCard label="Temps moyen réponse" value="SLA actif" delta="file reviewer" tone="ai" /><KpiCard label="Trades sensibles" value={`${metrics.validation.highRisk + metrics.validation.lowConfidence}`} delta={`${metrics.validation.lowConfidence} confiance faible`} tone="info" /></div>
-      <HumanValidationWorkspace requests={validationRequests} trades={trades} riskPercent={metrics.risk.tradeRiskPercent} />
-    </>
-  );
+  return <RiskPage defaultTab="validation" />;
 }
 
-export async function LLMProvidersPage() {
-  const { agents, marketAssets, priceSeries, monthlyHeatmap, resultDistribution, strategies, strategyComparison, replaySteps, trades, alerts, riskLimits, riskRules, allLlmProviders, llmRoleConfig, crisisScenarios, crisisTimeline, maturityScores, scoreEvolution, validationRequests, weeklyBars, weeklyLessons, sourceStatus, metrics } = await getAppData();
-
+function LLMProvidersPanel({ data }: { data: AppDataSnapshot }) {
+  const { allLlmProviders, llmRoleConfig, sourceStatus, metrics } = data;
   const connected = metrics.llm.connectedProviders;
 
   return (
     <>
-      <SectionTitle
-        title="Configuration LLM / Providers IA"
-        subtitle="Séparez raisonnement, scan rapide, audit et fallback. Le moteur de risque reste indépendant du LLM."
-        icon={<BrainCircuit />}
-      />
-      <PageActions><Link href="/settings"><Button variant="ghost">Paramètres</Button></Link><Link href="/agents/new"><Button variant="ghost">Nouvel agent</Button></Link><Link href="/risk"><Button variant="ghost"><Shield className="size-4" /> Moteur risque</Button></Link></PageActions>
       <div className="grid grid-cols-5 gap-4">
         <KpiCard label="Fournisseurs catalogue" value={`${metrics.llm.totalProviders}`} delta="OpenAI, Europe, Asie, custom" tone="info" />
         <KpiCard label="Connectés" value={`${connected}`} delta={sourceStatus.llm === "connected" ? "Clés détectées côté serveur" : "Aucune clé dans .env"} tone="success" />
@@ -847,4 +857,8 @@ export async function LLMProvidersPage() {
       </div>
     </>
   );
+}
+
+export async function LLMProvidersPage() {
+  return <SettingsPage defaultTab="llm" />;
 }
