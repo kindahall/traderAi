@@ -110,6 +110,19 @@ type StrategyImprovementSample = {
   drawdown: number;
 };
 
+type StrategyImprovementRuntimeChange = {
+  agentId: string;
+  agentName: string;
+  minConfidenceBefore: number;
+  minConfidenceAfter: number;
+  minVolumeRatioBefore: number;
+  minVolumeRatioAfter: number;
+  riskMultiplierBefore: number;
+  riskMultiplierAfter: number;
+  cooldownMinutesBefore: number;
+  cooldownMinutesAfter: number;
+};
+
 type StrategyImprovementNote = {
   id: string;
   strategyId: string;
@@ -123,6 +136,7 @@ type StrategyImprovementNote = {
   dismissedAt?: string;
   expiredAt?: string;
   appliedAgentIds: string[];
+  runtimeChanges: StrategyImprovementRuntimeChange[];
   analysisProvider: StrategyImprovementAnalysisProvider;
   analysisLatencyMs?: number;
   analysisError?: string;
@@ -183,6 +197,8 @@ const emptyImprovementState: StrategyImprovementState = {
   notes: [],
 };
 
+const SELECTED_STRATEGY_STORAGE_KEY = "traderai:selected-strategy-id";
+
 const comparisonKeys: Record<string, string> = {
   "trend-momentum": "trend",
   "breakout-h4": "breakout",
@@ -211,6 +227,8 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StrategyStatusFilter>("all");
   const [selectedId, setSelectedId] = useState(strategies[0]?.id ?? "");
+  const [selectionTouched, setSelectionTouched] = useState(false);
+  const [storedSelectionLoaded, setStoredSelectionLoaded] = useState(false);
   const [statusOverrides, setStatusOverrides] = useState<Record<string, StrategyDefinition["status"]>>({});
   const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
   const [localDrafts, setLocalDrafts] = useState<StrategyDefinition[]>([]);
@@ -283,6 +301,10 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     () => improvements.notes.filter((note) => note.status === "proposed" || note.status === "approved"),
     [improvements.notes],
   );
+  const proposedImprovementNotes = useMemo(
+    () => improvements.notes.filter((note) => note.status === "proposed"),
+    [improvements.notes],
+  );
   const improvementByStrategyId = useMemo(
     () => new Map(visibleImprovementNotes.map((note) => [note.strategyId, note])),
     [visibleImprovementNotes],
@@ -290,9 +312,41 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
 
   const selected = allStrategies.find((strategy) => strategy.id === selectedId) ?? visibleStrategies[0] ?? allStrategies[0];
   const selectedImprovement = selected ? improvementByStrategyId.get(selected.id) : undefined;
+  const selectedEditorImprovement = selectedImprovement?.status === "proposed" ? selectedImprovement : undefined;
   const activeCount = allStrategies.filter((strategy) => strategy.status === "active").length;
   const draftCount = allStrategies.filter((strategy) => strategy.status === "draft").length;
   const comparisonKey = comparisonKeys[selected?.id ?? ""] ?? comparisonKeys[selected?.id.replace(/-copy-.+$/, "") ?? ""] ?? "trend";
+
+  useEffect(() => {
+    if (storedSelectionLoaded || !allStrategies.length) return;
+    const storedId = window.localStorage.getItem(SELECTED_STRATEGY_STORAGE_KEY);
+    window.queueMicrotask(() => {
+      if (storedId && allStrategies.some((strategy) => strategy.id === storedId)) {
+        setSelectedId(storedId);
+        setSelectionTouched(true);
+      }
+      setStoredSelectionLoaded(true);
+    });
+  }, [allStrategies, storedSelectionLoaded]);
+
+  useEffect(() => {
+    if (!allStrategies.length) return;
+    if (!allStrategies.some((strategy) => strategy.id === selectedId)) {
+      window.queueMicrotask(() => setSelectedId(visibleStrategies[0]?.id ?? allStrategies[0].id));
+      return;
+    }
+
+    const nextActionNote = proposedImprovementNotes.find((note) => allStrategies.some((strategy) => strategy.id === note.strategyId));
+    if (!selectionTouched && nextActionNote && selectedImprovement?.status !== "proposed") {
+      window.queueMicrotask(() => setSelectedId(nextActionNote.strategyId));
+    }
+  }, [allStrategies, proposedImprovementNotes, selectedId, selectedImprovement?.status, selectionTouched, visibleStrategies]);
+
+  function selectStrategy(strategyId: string, persist = true) {
+    setSelectedId(strategyId);
+    setSelectionTouched(true);
+    if (persist) window.localStorage.setItem(SELECTED_STRATEGY_STORAGE_KEY, strategyId);
+  }
 
   async function toggleStrategyStatus(strategyId: string) {
     const strategy = allStrategies.find((item) => item.id === strategyId);
@@ -332,7 +386,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
 
     const nextSelectedId = allStrategies.find((item) => item.id !== strategyId)?.id ?? "";
     setDeletedIds((current) => new Set([...current, strategyId]));
-    setSelectedId(nextSelectedId);
+    if (nextSelectedId) selectStrategy(nextSelectedId);
     setDiscoveryError("");
     setScanStatus(`${strategy.name} supprimée de la vue locale.`);
 
@@ -358,7 +412,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
         next.delete(strategyId);
         return next;
       });
-      setSelectedId(strategyId);
+      selectStrategy(strategyId);
       setDiscoveryError("Suppression stratégie non enregistrée.");
       setScanStatus("");
     }
@@ -375,7 +429,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     };
     const nextDrafts = writeLocalStrategyDraft(copy);
     setLocalDrafts(nextDrafts);
-    setSelectedId(copy.id);
+    selectStrategy(copy.id);
     setActionsOpen(true);
   }
 
@@ -595,7 +649,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     const nextDrafts = writeLocalStrategyDraft(strategy);
     setLocalDrafts(nextDrafts);
     setStatusOverrides((current) => ({ ...current, [strategy.id]: status }));
-    setSelectedId(strategy.id);
+    selectStrategy(strategy.id);
     setActionsOpen(true);
     return strategy;
   }
@@ -718,7 +772,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
           return (
           <GlassCard key={strategy.id} data-strategy-card-id={strategy.id} data-strategy-card-name={slug(strategy.name)} className={strategy.id === selected.id ? "border-sky-400/60" : ""}>
             <div className="flex items-start justify-between gap-3">
-              <button type="button" onClick={() => setSelectedId(strategy.id)} className="min-w-0 flex-1 text-left">
+              <button type="button" onClick={() => selectStrategy(strategy.id)} className="min-w-0 flex-1 text-left">
                 <div className="truncate text-lg font-bold text-white">{strategy.name}</div>
                 <div className="mt-1 text-xs text-slate-400">{strategy.timeframe} · Risque <span className={strategy.risk === "Élevé" ? "text-red-300" : "text-amber-300"}>{strategy.risk}</span></div>
                 <div className="mt-2 flex flex-wrap gap-2">
@@ -768,30 +822,26 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
               Activations enregistrées côté runtime local. Les stratégies paper découvertes reprennent aussi les métriques du journal.
             </div>
           ) : null}
-          {selectedImprovement ? (
+          {selectedEditorImprovement ? (
             <div className="mb-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/8 p-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge tone={selectedImprovement.status === "approved" ? "success" : "warning"}>{improvementStatusLabel(selectedImprovement.status)}</StatusBadge>
-                    <StatusBadge tone={selectedImprovement.analysisProvider === "codex" ? "ai" : "neutral"}>{selectedImprovement.analysisProvider === "codex" ? "Codex" : "fallback"}</StatusBadge>
-                    <span className="text-sm font-semibold text-white">Note agent</span>
+                    <StatusBadge tone="warning">{improvementStatusLabel(selectedEditorImprovement.status)}</StatusBadge>
+                    <StatusBadge tone={selectedEditorImprovement.analysisProvider === "codex" ? "ai" : "neutral"}>{selectedEditorImprovement.analysisProvider === "codex" ? "Codex" : "fallback"}</StatusBadge>
+                    <span className="text-sm font-semibold text-white">Validation requise</span>
                   </div>
-                  <div className="mt-2 text-sm leading-relaxed text-slate-300">{selectedImprovement.improvement}</div>
-                  {selectedImprovement.strategySpecificRules.length ? (
+                  <div className="mt-2 text-sm leading-relaxed text-slate-300">{selectedEditorImprovement.improvement}</div>
+                  {selectedEditorImprovement.strategySpecificRules.length ? (
                     <div className="mt-2 space-y-1">
-                      {selectedImprovement.strategySpecificRules.slice(0, 3).map((rule, index) => <div key={`${selectedImprovement.id}-selected-rule-${index}`} className="rounded-lg border border-sky-400/15 bg-sky-500/[0.05] px-2 py-1 text-xs leading-relaxed text-sky-100">{rule}</div>)}
+                      {selectedEditorImprovement.strategySpecificRules.slice(0, 3).map((rule, index) => <div key={`${selectedEditorImprovement.id}-selected-rule-${index}`} className="rounded-lg border border-sky-400/15 bg-sky-500/[0.05] px-2 py-1 text-xs leading-relaxed text-sky-100">{rule}</div>)}
                     </div>
                   ) : null}
                 </div>
-                {selectedImprovement.status === "proposed" ? (
-                  <div className="flex shrink-0 flex-wrap gap-2">
-                    <Button size="sm" variant="success" onClick={() => void updateImprovementNote(selectedImprovement.id, "approve")} disabled={improvementBusy}><CheckCircle2 className="size-4" /> Valider</Button>
-                    <Button size="sm" variant="ghost" onClick={() => void updateImprovementNote(selectedImprovement.id, "dismiss")} disabled={improvementBusy}><XCircle className="size-4" /> Ignorer</Button>
-                  </div>
-                ) : (
-                  <StatusBadge tone="success">visible encore {selectedImprovement.remainingClosedTrades} trade(s) clos</StatusBadge>
-                )}
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <Button size="sm" variant="success" onClick={() => void updateImprovementNote(selectedEditorImprovement.id, "approve")} disabled={improvementBusy}><CheckCircle2 className="size-4" /> Valider</Button>
+                  <Button size="sm" variant="ghost" onClick={() => void updateImprovementNote(selectedEditorImprovement.id, "dismiss")} disabled={improvementBusy}><XCircle className="size-4" /> Ignorer</Button>
+                </div>
               </div>
             </div>
           ) : null}
@@ -911,6 +961,7 @@ function StrategyImprovementPanel({
                   </>
                 )}
               </div>
+              {note.status === "approved" ? <RuntimeChangeSummary note={note} /> : null}
             </div>
           )) : (
             <div className="rounded-xl border border-dashed border-[#16314a] bg-slate-950/35 p-4 text-sm text-slate-400">
@@ -934,6 +985,32 @@ function StrategyImprovementPanel({
         </div>
       </div>
     </GlassCard>
+  );
+}
+
+function RuntimeChangeSummary({ note }: { note: StrategyImprovementNote }) {
+  if (!note.runtimeChanges.length) {
+    return (
+      <div className="mt-3 rounded-xl border border-emerald-400/15 bg-emerald-500/[0.05] p-2 text-xs text-emerald-100">
+        Profil paper modifié pour {note.appliedAgentIds.length || 0} agent(s). Les anciennes validations restent suivies dans le journal runtime.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 grid grid-cols-2 gap-2">
+      {note.runtimeChanges.map((change) => (
+        <div key={`${note.id}-${change.agentId}`} className="rounded-xl border border-emerald-400/15 bg-emerald-500/[0.05] p-2 text-xs text-emerald-100">
+          <div className="font-semibold text-white">{change.agentName}</div>
+          <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-1 text-slate-300">
+            <span>Confiance</span><span className="text-right">{change.minConfidenceBefore}→{change.minConfidenceAfter}</span>
+            <span>Volume min.</span><span className="text-right">{change.minVolumeRatioBefore}→{change.minVolumeRatioAfter}</span>
+            <span>Risque</span><span className="text-right">{change.riskMultiplierBefore}→{change.riskMultiplierAfter}</span>
+            <span>Cooldown</span><span className="text-right">{change.cooldownMinutesBefore}→{change.cooldownMinutesAfter} min</span>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

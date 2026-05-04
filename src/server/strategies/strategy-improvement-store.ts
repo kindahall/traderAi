@@ -24,6 +24,19 @@ export type StrategyImprovementSample = {
   drawdown: number;
 };
 
+export type StrategyImprovementRuntimeChange = {
+  agentId: string;
+  agentName: string;
+  minConfidenceBefore: number;
+  minConfidenceAfter: number;
+  minVolumeRatioBefore: number;
+  minVolumeRatioAfter: number;
+  riskMultiplierBefore: number;
+  riskMultiplierAfter: number;
+  cooldownMinutesBefore: number;
+  cooldownMinutesAfter: number;
+};
+
 export type StrategyImprovementNote = {
   id: string;
   strategyId: string;
@@ -37,6 +50,7 @@ export type StrategyImprovementNote = {
   dismissedAt?: string;
   expiredAt?: string;
   appliedAgentIds: string[];
+  runtimeChanges: StrategyImprovementRuntimeChange[];
   analysisProvider: StrategyImprovementAnalysisProvider;
   analysisLatencyMs?: number;
   analysisError?: string;
@@ -165,6 +179,25 @@ function normalizeSample(value: unknown): StrategyImprovementSample {
   };
 }
 
+function normalizeRuntimeChange(value: unknown): StrategyImprovementRuntimeChange | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Partial<StrategyImprovementRuntimeChange>;
+  if (!input.agentId || !input.agentName) return null;
+
+  return {
+    agentId: input.agentId,
+    agentName: input.agentName,
+    minConfidenceBefore: numberValue(input.minConfidenceBefore, 0, 0, 100),
+    minConfidenceAfter: numberValue(input.minConfidenceAfter, 0, 0, 100),
+    minVolumeRatioBefore: numberValue(input.minVolumeRatioBefore, 0, 0, 5),
+    minVolumeRatioAfter: numberValue(input.minVolumeRatioAfter, 0, 0, 5),
+    riskMultiplierBefore: numberValue(input.riskMultiplierBefore, 0, 0, 5),
+    riskMultiplierAfter: numberValue(input.riskMultiplierAfter, 0, 0, 5),
+    cooldownMinutesBefore: numberValue(input.cooldownMinutesBefore, 0, 0, 240),
+    cooldownMinutesAfter: numberValue(input.cooldownMinutesAfter, 0, 0, 240),
+  };
+}
+
 function normalizeNote(value: unknown): StrategyImprovementNote | null {
   if (!value || typeof value !== "object") return null;
   const input = value as Partial<StrategyImprovementNote>;
@@ -188,6 +221,9 @@ function normalizeNote(value: unknown): StrategyImprovementNote | null {
     dismissedAt: stringValue(input.dismissedAt, "") || undefined,
     expiredAt: stringValue(input.expiredAt, "") || undefined,
     appliedAgentIds: Array.isArray(input.appliedAgentIds) ? input.appliedAgentIds.filter((id): id is string => typeof id === "string") : [],
+    runtimeChanges: Array.isArray(input.runtimeChanges)
+      ? input.runtimeChanges.map(normalizeRuntimeChange).filter((change): change is StrategyImprovementRuntimeChange => Boolean(change))
+      : [],
     analysisProvider,
     analysisLatencyMs: input.analysisLatencyMs ? numberValue(input.analysisLatencyMs, 0) : undefined,
     analysisError: stringValue(input.analysisError, "") || undefined,
@@ -677,6 +713,7 @@ export async function runDailyStrategyImprovementReview(strategies: StrategyDefi
       status: "proposed",
       approvalRequired: true,
       appliedAgentIds: [],
+      runtimeChanges: [],
       analysisProvider: recommendation.analysisProvider,
       analysisLatencyMs: recommendation.analysisLatencyMs,
       analysisError: recommendation.analysisError,
@@ -733,6 +770,21 @@ function adjustProfile(profile: StrategyRuntimeProfile, note: StrategyImprovemen
   };
 }
 
+function runtimeChangeFor(agent: Agent, before: StrategyRuntimeProfile, after: StrategyRuntimeProfile): StrategyImprovementRuntimeChange {
+  return {
+    agentId: agent.id,
+    agentName: agent.name,
+    minConfidenceBefore: before.minConfidence,
+    minConfidenceAfter: after.minConfidence,
+    minVolumeRatioBefore: before.minVolumeRatio,
+    minVolumeRatioAfter: after.minVolumeRatio,
+    riskMultiplierBefore: before.riskMultiplier,
+    riskMultiplierAfter: after.riskMultiplier,
+    cooldownMinutesBefore: before.cooldownMinutes,
+    cooldownMinutesAfter: after.cooldownMinutes,
+  };
+}
+
 function approvalEvent(agent: Agent, before: StrategyRuntimeProfile, after: StrategyRuntimeProfile, note: StrategyImprovementNote, cycleId: string): PaperTradingEvent {
   return {
     id: `EVT-${Date.now().toString(36).toUpperCase()}-${agent.id}`,
@@ -759,7 +811,7 @@ function approvalEvent(agent: Agent, before: StrategyRuntimeProfile, after: Stra
 
 async function applyApprovedRuntimeAdjustment(strategy: StrategyDefinition, note: StrategyImprovementNote) {
   const affectedAgents = matchingAgents(strategy).filter((agent) => agent.mode === "paper");
-  if (!affectedAgents.length) return [] as string[];
+  if (!affectedAgents.length) return [] as StrategyImprovementRuntimeChange[];
 
   const state = await readPaperTradingState();
   const normalizedProfiles = normalizeStrategyProfiles(state);
@@ -767,11 +819,13 @@ async function applyApprovedRuntimeAdjustment(strategy: StrategyDefinition, note
   const affectedIds = new Set(affectedAgents.map((agent) => agent.id));
   const cycleId = `HUMAN-${Date.now().toString(36).toUpperCase()}`;
   const events: PaperTradingEvent[] = [];
+  const runtimeChanges: StrategyImprovementRuntimeChange[] = [];
   const nextProfiles = normalizedProfiles.map((profile) => {
     if (!affectedIds.has(profile.agentId)) return profile;
     const agent = affectedAgents.find((candidate) => candidate.id === profile.agentId);
     if (!agent) return profile;
     const next = adjustProfile(profile, note);
+    runtimeChanges.push(runtimeChangeFor(agent, profile, next));
     events.push(approvalEvent(agent, profile, next, note, cycleId));
     return next;
   });
@@ -781,6 +835,7 @@ async function applyApprovedRuntimeAdjustment(strategy: StrategyDefinition, note
     const before = defaultStrategyProfile(agent);
     const after = adjustProfile(before, note);
     nextProfiles.push(after);
+    runtimeChanges.push(runtimeChangeFor(agent, before, after));
     events.push(approvalEvent(agent, before, after, note, cycleId));
   }
 
@@ -790,7 +845,7 @@ async function applyApprovedRuntimeAdjustment(strategy: StrategyDefinition, note
     events: [...state.events, ...events],
   });
 
-  return affectedAgents.map((agent) => agent.id);
+  return runtimeChanges;
 }
 
 export async function approveStrategyImprovementNote(noteId: string, strategies: StrategyDefinition[]) {
@@ -813,11 +868,15 @@ export async function approveStrategyImprovementNote(noteId: string, strategies:
     closedTradesObserved: 0,
     remainingClosedTrades: EXPIRE_AFTER_CLOSED_TRADES,
   };
-  const appliedAgentIds = await applyApprovedRuntimeAdjustment(strategy, approved);
+  const runtimeChanges = await applyApprovedRuntimeAdjustment(strategy, approved);
 
   state = {
     ...state,
-    notes: state.notes.map((item) => item.id === noteId ? { ...approved, appliedAgentIds } : item),
+    notes: state.notes.map((item) => item.id === noteId ? {
+      ...approved,
+      appliedAgentIds: runtimeChanges.map((change) => change.agentId),
+      runtimeChanges,
+    } : item),
   };
 
   return writeState(refreshVisibility(state, strategies));
