@@ -65,12 +65,29 @@ function getMovableCards(scope: HTMLElement | null) {
 }
 
 function applyPanelStyle(element: HTMLElement, layout?: PanelLayout) {
+  if (!layout) {
+    element.style.position = "";
+    element.style.transform = "";
+    element.style.width = "";
+    element.style.height = "";
+    element.style.minHeight = "";
+    element.style.zIndex = "";
+    return;
+  }
+
   element.style.position = "relative";
-  element.style.transform = layout ? `translate3d(${layout.x}px, ${layout.y}px, 0)` : "";
+  element.style.transform = `translate3d(${layout.x}px, ${layout.y}px, 0)`;
   element.style.width = layout?.width ? `${layout.width}px` : "";
   element.style.height = layout?.height ? `${layout.height}px` : "";
   element.style.minHeight = layout?.height ? `${layout.height}px` : "";
   element.style.zIndex = layout?.z ? String(layout.z) : "";
+}
+
+function clearCardPersonalization(element: HTMLElement) {
+  delete element.dataset.layoutItemId;
+  element.classList.remove("layout-personalizer-card", "layout-personalizer-editing", "layout-personalizer-resetting", "layout-personalizer-active");
+  removeResizeHandle(element);
+  applyPanelStyle(element);
 }
 
 function upsertResizeHandle(element: HTMLElement) {
@@ -113,11 +130,19 @@ export function LayoutPersonalizer() {
 
     cards.forEach((card, index) => {
       const id = cardIdForIndex(index);
+      const layout = layoutsRef.current[id];
+      const shouldPersonalize = Boolean(layout) || editing || resetActive;
+
+      if (!shouldPersonalize) {
+        clearCardPersonalization(card);
+        return;
+      }
+
       card.dataset.layoutItemId = id;
       card.classList.add("layout-personalizer-card");
       card.classList.toggle("layout-personalizer-editing", editing);
       card.classList.toggle("layout-personalizer-resetting", resetActive);
-      applyPanelStyle(card, layoutsRef.current[id]);
+      applyPanelStyle(card, layout ?? { x: 0, y: 0 });
       if (editing && !resetActive) upsertResizeHandle(card);
       else removeResizeHandle(card);
     });

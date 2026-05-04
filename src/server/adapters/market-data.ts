@@ -1,5 +1,6 @@
 import type { MarketAsset, MarketCandle } from "@/types/trading";
 import { DYDX_NON_CRYPTO_BASES, DYDX_TOP_CRYPTO_MARKETS } from "@/lib/trading-universe";
+import { marketAssets as fallbackMarketAssets, priceSeries as fallbackPriceSeries } from "@/data/legacy/markets-reference";
 
 export type MarketProviderId = "dydx" | "binance" | "kraken" | "coinbase";
 export type MarketInstrumentType = "spot" | "perp";
@@ -130,6 +131,8 @@ const PROVIDER_DEFAULT_SYMBOLS: Record<MarketProviderId, string[]> = {
   coinbase: ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "AVAX-USD", "DOGE-USD", "LINK-USD", "LTC-USD"],
 };
 
+const DEFAULT_MARKET_FETCH_TIMEOUT_MS = 2_500;
+
 type NextFetchInit = RequestInit & { next?: { revalidate: number } };
 
 function refreshSecondsFromEnv(value: string | undefined, fallback: number) {
@@ -148,6 +151,28 @@ function liveCandleFetchInit(providerId: MarketProviderId): NextFetchInit {
   const fallback = providerId === "dydx" ? 2 : 5;
   const revalidate = refreshSecondsFromEnv(process.env.MARKET_CANDLE_REVALIDATE_SECONDS, fallback);
   return revalidate === 0 ? { cache: "no-store" } : { next: { revalidate } };
+}
+
+function marketFetchTimeoutMs() {
+  const configured = Number(process.env.MARKET_FETCH_TIMEOUT_MS ?? DEFAULT_MARKET_FETCH_TIMEOUT_MS);
+  return Math.max(500, Math.min(15_000, Number.isFinite(configured) ? Math.round(configured) : DEFAULT_MARKET_FETCH_TIMEOUT_MS));
+}
+
+async function fetchWithTimeout(url: string, init: NextFetchInit, label: string) {
+  const timeoutMs = marketFetchTimeoutMs();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${label} timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizeProvider(value?: string): MarketProviderId {
@@ -324,6 +349,58 @@ function finalizeAssets(assets: AssetDraft[]) {
     });
 }
 
+function fallbackAssets(config: MarketProviderConfig): MarketAsset[] {
+  return fallbackMarketAssets.map((asset) => {
+    const [baseAsset = asset.baseAsset, quoteAsset = asset.quoteAsset || "USDT"] = asset.symbol.split("/");
+
+    return {
+      ...asset,
+      exchange: asset.exchange ?? config.id,
+      exchangeName: asset.exchangeName ?? `${config.label} (secours local)`,
+      marketType: asset.marketType ?? config.instrumentType,
+      exchangeSymbol: asset.exchangeSymbol ?? compactSymbol(asset.symbol),
+      baseAsset: asset.baseAsset ?? baseAsset,
+      quoteAsset: asset.quoteAsset ?? quoteAsset,
+      status: asset.status ?? "fallback",
+    };
+  });
+}
+
+function fallbackSeries(): PricePoint[] {
+  return fallbackPriceSeries.map((point) => ({ ...point }));
+}
+
+function intervalMs(interval: string) {
+  const value = Number.parseInt(interval, 10);
+  const amount = Number.isFinite(value) && value > 0 ? value : 1;
+  if (interval.endsWith("d")) return amount * 24 * 60 * 60 * 1000;
+  if (interval.endsWith("h")) return amount * 60 * 60 * 1000;
+  return amount * 60 * 1000;
+}
+
+function fallbackCandles(interval: string, limit: number): MarketCandle[] {
+  const points = fallbackSeries().slice(-Math.max(20, Math.min(limit, fallbackPriceSeries.length)));
+  const stepMs = intervalMs(interval);
+  const now = Date.now();
+
+  return points.map((point, index) => {
+    const previous = points[index - 1];
+    const open = previous?.price ?? point.benchmark ?? point.price;
+    const close = point.price;
+    const spread = Math.max(close * 0.002, Math.abs(close - open));
+
+    return {
+      time: now - (points.length - 1 - index) * stepMs,
+      open,
+      high: Math.max(open, close) + spread * 0.35,
+      low: Math.max(0, Math.min(open, close) - spread * 0.35),
+      close,
+      volume: point.volume,
+      closed: true,
+    };
+  });
+}
+
 async function mapLimit<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
   const results: R[] = [];
   let index = 0;
@@ -348,7 +425,7 @@ async function fetchDydxAssets(config: MarketProviderConfig) {
   const configuredSymbols = getConfiguredSymbols();
   const quotes = getQuoteAssets(config.id);
   const topCryptoOnly = usesAutoDydxUniverse(config.id);
-  const response = await fetch(`${config.restBaseUrl}/v4/perpetualMarkets`, liveMarketFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/v4/perpetualMarkets`, liveMarketFetchInit(config.id), "dYdX perpetual markets");
   assertOk(response, "dYdX perpetual markets");
   const payload = (await response.json()) as { markets?: Record<string, DydxMarket> };
   const markets = Object.values(payload.markets || {});
@@ -390,7 +467,7 @@ async function fetchBinanceAssets(config: MarketProviderConfig) {
   const quotes = getQuoteAssets(config.id);
   const configuredList = configuredSymbols ? parseCsv(process.env.MARKET_SYMBOLS).map((symbol) => compactSymbol(symbol)) : [];
   const query = configuredList.length ? `?symbols=${encodeURIComponent(JSON.stringify(configuredList))}` : "";
-  const response = await fetch(`${config.restBaseUrl}/api/v3/ticker/24hr${query}`, liveMarketFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/api/v3/ticker/24hr${query}`, liveMarketFetchInit(config.id), "Binance ticker");
   assertOk(response, "Binance ticker");
   const tickers = (await response.json()) as BinanceTicker[];
 
@@ -424,7 +501,7 @@ async function fetchBinanceAssets(config: MarketProviderConfig) {
 async function fetchCoinbaseAssets(config: MarketProviderConfig) {
   const configuredSymbols = getConfiguredSymbols();
   const quotes = getQuoteAssets(config.id);
-  const productsResponse = await fetch(`${config.restBaseUrl}/products`, { next: { revalidate: 60 } });
+  const productsResponse = await fetchWithTimeout(`${config.restBaseUrl}/products`, { next: { revalidate: 60 } }, "Coinbase products");
   assertOk(productsResponse, "Coinbase products");
   const products = (await productsResponse.json()) as CoinbaseProduct[];
   const selectedProducts = products
@@ -434,7 +511,7 @@ async function fetchCoinbaseAssets(config: MarketProviderConfig) {
     .slice(0, getMarketLimit(config.id));
 
   const assets = await mapLimit(selectedProducts, 12, async (product) => {
-    const statsResponse = await fetch(`${config.restBaseUrl}/products/${encodeURIComponent(product.id)}/stats`, liveMarketFetchInit(config.id));
+    const statsResponse = await fetchWithTimeout(`${config.restBaseUrl}/products/${encodeURIComponent(product.id)}/stats`, liveMarketFetchInit(config.id), `Coinbase ${product.id} stats`);
     assertOk(statsResponse, `Coinbase ${product.id} stats`);
     const stats = (await statsResponse.json()) as CoinbaseStats;
     const price = Number(stats.last);
@@ -464,8 +541,8 @@ async function fetchKrakenAssets(config: MarketProviderConfig) {
   const configuredSymbols = getConfiguredSymbols();
   const quotes = getQuoteAssets(config.id);
   const [pairsResponse, tickerResponse] = await Promise.all([
-    fetch(`${config.restBaseUrl}/0/public/AssetPairs`, { next: { revalidate: 60 } }),
-    fetch(`${config.restBaseUrl}/0/public/Ticker`, liveMarketFetchInit(config.id)),
+    fetchWithTimeout(`${config.restBaseUrl}/0/public/AssetPairs`, { next: { revalidate: 60 } }, "Kraken asset pairs"),
+    fetchWithTimeout(`${config.restBaseUrl}/0/public/Ticker`, liveMarketFetchInit(config.id), "Kraken ticker"),
   ]);
   assertOk(pairsResponse, "Kraken asset pairs");
   assertOk(tickerResponse, "Kraken ticker");
@@ -511,10 +588,14 @@ async function fetchKrakenAssets(config: MarketProviderConfig) {
 
 export async function fetchMarketAssets(): Promise<MarketAsset[]> {
   const config = getMarketProviderConfig();
-  if (config.id === "dydx") return fetchDydxAssets(config);
-  if (config.id === "coinbase") return fetchCoinbaseAssets(config);
-  if (config.id === "kraken") return fetchKrakenAssets(config);
-  return fetchBinanceAssets(config);
+  try {
+    if (config.id === "dydx") return fetchDydxAssets(config);
+    if (config.id === "coinbase") return fetchCoinbaseAssets(config);
+    if (config.id === "kraken") return fetchKrakenAssets(config);
+    return fetchBinanceAssets(config);
+  } catch {
+    return fallbackAssets(config);
+  }
 }
 
 function defaultPrimarySymbol(config: MarketProviderConfig) {
@@ -613,7 +694,7 @@ function normalizeInterval(interval: string) {
 
 async function fetchDydxCandles(config: MarketProviderConfig, symbol: string, interval: string, limit: number) {
   const ticker = toDydxSymbol(symbol);
-  const response = await fetch(`${config.restBaseUrl}/v4/candles/perpetualMarkets/${encodeURIComponent(ticker)}?resolution=${encodeURIComponent(dydxResolution(interval))}&limit=${limit}`, liveCandleFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/v4/candles/perpetualMarkets/${encodeURIComponent(ticker)}?resolution=${encodeURIComponent(dydxResolution(interval))}&limit=${limit}`, liveCandleFetchInit(config.id), "dYdX candles");
   assertOk(response, "dYdX candles");
   const payload = (await response.json()) as { candles?: DydxCandle[] };
 
@@ -632,7 +713,7 @@ async function fetchDydxCandles(config: MarketProviderConfig, symbol: string, in
 
 async function fetchBinanceCandles(config: MarketProviderConfig, symbol: string, interval: string, limit: number) {
   const ticker = toBinanceSymbol(symbol);
-  const response = await fetch(`${config.restBaseUrl}/api/v3/klines?symbol=${encodeURIComponent(ticker)}&interval=${encodeURIComponent(normalizeInterval(interval))}&limit=${limit}`, liveCandleFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/api/v3/klines?symbol=${encodeURIComponent(ticker)}&interval=${encodeURIComponent(normalizeInterval(interval))}&limit=${limit}`, liveCandleFetchInit(config.id), "Binance candles");
   assertOk(response, "Binance candles");
   const klines = (await response.json()) as BinanceKline[];
 
@@ -650,7 +731,7 @@ async function fetchBinanceCandles(config: MarketProviderConfig, symbol: string,
 async function fetchCoinbaseCandles(config: MarketProviderConfig, symbol: string, interval: string, limit: number) {
   const productId = toCoinbaseSymbol(symbol);
   const granularity = coinbaseGranularity(interval);
-  const response = await fetch(`${config.restBaseUrl}/products/${encodeURIComponent(productId)}/candles?granularity=${granularity}`, liveCandleFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/products/${encodeURIComponent(productId)}/candles?granularity=${granularity}`, liveCandleFetchInit(config.id), "Coinbase candles");
   assertOk(response, "Coinbase candles");
   const rows = (await response.json()) as Array<[number, number, number, number, number, number]>;
 
@@ -670,7 +751,7 @@ async function fetchCoinbaseCandles(config: MarketProviderConfig, symbol: string
 
 async function fetchKrakenCandles(config: MarketProviderConfig, symbol: string, interval: string, limit: number) {
   const pair = toKrakenSymbol(symbol);
-  const response = await fetch(`${config.restBaseUrl}/0/public/OHLC?pair=${encodeURIComponent(pair)}&interval=${krakenInterval(interval)}`, liveCandleFetchInit(config.id));
+  const response = await fetchWithTimeout(`${config.restBaseUrl}/0/public/OHLC?pair=${encodeURIComponent(pair)}&interval=${krakenInterval(interval)}`, liveCandleFetchInit(config.id), "Kraken OHLC");
   assertOk(response, "Kraken OHLC");
   const payload = (await response.json()) as { error?: string[]; result?: Record<string, Array<[number, string, string, string, string, string, string, number]> | number> };
   if (payload.error?.length) throw new Error(`Kraken OHLC error ${payload.error.join(", ")}`);
@@ -697,15 +778,20 @@ export async function fetchCandles(symbol?: string, interval = "1m", limit = 180
   const safeInterval = normalizeInterval(interval);
   const safeLimit = Math.min(config.id === "coinbase" ? 300 : 1000, Math.max(20, limit));
 
-  if (config.id === "dydx") return fetchDydxCandles(config, safeSymbol, safeInterval, safeLimit);
-  if (config.id === "coinbase") return fetchCoinbaseCandles(config, safeSymbol, safeInterval, safeLimit);
-  if (config.id === "kraken") return fetchKrakenCandles(config, safeSymbol, safeInterval, safeLimit);
-  return fetchBinanceCandles(config, safeSymbol, safeInterval, safeLimit);
+  try {
+    if (config.id === "dydx") return fetchDydxCandles(config, safeSymbol, safeInterval, safeLimit);
+    if (config.id === "coinbase") return fetchCoinbaseCandles(config, safeSymbol, safeInterval, safeLimit);
+    if (config.id === "kraken") return fetchKrakenCandles(config, safeSymbol, safeInterval, safeLimit);
+    return fetchBinanceCandles(config, safeSymbol, safeInterval, safeLimit);
+  } catch {
+    return fallbackCandles(safeInterval, safeLimit);
+  }
 }
 
 export async function fetchPriceSeries(symbol?: string): Promise<PricePoint[]> {
   const config = getMarketProviderConfig();
   const candles = await fetchCandles(symbol || defaultPrimarySymbol(config), "1h", 48);
+  if (!candles.length) return fallbackSeries();
   const firstClose = Number(candles[0]?.close || 1);
 
   return candles.map((candle, index) => {

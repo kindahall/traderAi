@@ -36,7 +36,7 @@ let appDataInFlight: Promise<AppDataSnapshot> | null = null;
 
 function appDataCacheTtlMs() {
   const provider = getMarketProviderConfig();
-  const fallback = provider.id === "dydx" ? 2_000 : 10_000;
+  const fallback = provider.id === "dydx" ? 15_000 : 30_000;
   const configured = Number(process.env.APP_DATA_CACHE_TTL_MS ?? fallback);
   return Math.max(0, Number.isFinite(configured) ? configured : fallback);
 }
