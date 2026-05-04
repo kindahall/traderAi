@@ -3,7 +3,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Download, ExternalLink, LineChart, Loader2, Plus, RefreshCcw, Search, Sparkles, Telescope, Trash2 } from "lucide-react";
+import { CheckCircle2, Download, ExternalLink, LineChart, Loader2, Plus, RefreshCcw, Search, Sparkles, Telescope, Trash2, XCircle } from "lucide-react";
 import type { StrategyDefinition } from "@/data/runtime/strategies";
 import type { AppDataSnapshot } from "@/server/app-data";
 import { formatPercent, signed } from "@/lib/formatters";
@@ -94,6 +94,73 @@ type StrategyDiscoveryPayload = {
   error?: string;
 };
 
+type StrategyImprovementStatus = "proposed" | "approved" | "expired" | "dismissed";
+type StrategyImprovementAnalysisProvider = "codex" | "heuristic";
+
+type StrategyImprovementSample = {
+  totalTrades: number;
+  closedTrades: number;
+  openTrades: number;
+  closedTradeRatio: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  performance: number;
+  validationRate: number;
+  drawdown: number;
+};
+
+type StrategyImprovementNote = {
+  id: string;
+  strategyId: string;
+  strategyName: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewDate: string;
+  status: StrategyImprovementStatus;
+  approvalRequired: true;
+  approvedAt?: string;
+  dismissedAt?: string;
+  expiredAt?: string;
+  appliedAgentIds: string[];
+  analysisProvider: StrategyImprovementAnalysisProvider;
+  analysisLatencyMs?: number;
+  analysisError?: string;
+  reason: string;
+  decision: string;
+  improvement: string;
+  expectedImpact: string;
+  strategySpecificRules: string[];
+  guardrail: string;
+  before: StrategyImprovementSample;
+  baselineClosedTrades: number;
+  expireAfterClosedTrades: number;
+  closedTradesObserved: number;
+  remainingClosedTrades: number;
+  scoreBefore: number;
+  scoreAfter: number;
+  confidence: number;
+};
+
+type StrategyImprovementState = {
+  version: 1;
+  updatedAt: string;
+  lastReviewDate?: string;
+  requirements: {
+    minClosedTrades: number;
+    minClosedTradeRatio: number;
+    expireAfterClosedTrades: number;
+    minLosingTrades: number;
+  };
+  notes: StrategyImprovementNote[];
+};
+
+type StrategyImprovementPayload = {
+  ok: boolean;
+  state?: StrategyImprovementState;
+  error?: string;
+};
+
 const emptyDiscoveryState: StrategyDiscoveryState = {
   version: 1,
   enabled: true,
@@ -102,6 +169,18 @@ const emptyDiscoveryState: StrategyDiscoveryState = {
   updatedAt: "",
   sources: [],
   candidates: [],
+};
+
+const emptyImprovementState: StrategyImprovementState = {
+  version: 1,
+  updatedAt: "",
+  requirements: {
+    minClosedTrades: 10,
+    minClosedTradeRatio: 70,
+    expireAfterClosedTrades: 3,
+    minLosingTrades: 4,
+  },
+  notes: [],
 };
 
 const comparisonKeys: Record<string, string> = {
@@ -139,6 +218,9 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
   const [discovery, setDiscovery] = useState<StrategyDiscoveryState>(emptyDiscoveryState);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [discoveryError, setDiscoveryError] = useState("");
+  const [improvements, setImprovements] = useState<StrategyImprovementState>(emptyImprovementState);
+  const [improvementBusy, setImprovementBusy] = useState(false);
+  const [improvementError, setImprovementError] = useState("");
   const [candidateUrl, setCandidateUrl] = useState("");
   const [candidateTitle, setCandidateTitle] = useState("");
   const [candidateVisibility, setCandidateVisibility] = useState<StrategyDiscoveryVisibility>("open-source");
@@ -167,6 +249,10 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     void loadDiscovery();
   }, []);
 
+  useEffect(() => {
+    void loadImprovements();
+  }, []);
+
   const serverStrategyIds = useMemo(() => new Set(strategies.map((strategy) => strategy.id)), [strategies]);
   const serverStrategyNames = useMemo(() => new Set(strategies.map((strategy) => slug(strategy.name))), [strategies]);
   const visibleLocalDrafts = useMemo(
@@ -193,8 +279,17 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
           .some((value) => value.toLowerCase().includes(normalizedQuery));
       });
   }, [allStrategies, query, statusFilter]);
+  const visibleImprovementNotes = useMemo(
+    () => improvements.notes.filter((note) => note.status === "proposed" || note.status === "approved"),
+    [improvements.notes],
+  );
+  const improvementByStrategyId = useMemo(
+    () => new Map(visibleImprovementNotes.map((note) => [note.strategyId, note])),
+    [visibleImprovementNotes],
+  );
 
   const selected = allStrategies.find((strategy) => strategy.id === selectedId) ?? visibleStrategies[0] ?? allStrategies[0];
+  const selectedImprovement = selected ? improvementByStrategyId.get(selected.id) : undefined;
   const activeCount = allStrategies.filter((strategy) => strategy.status === "active").length;
   const draftCount = allStrategies.filter((strategy) => strategy.status === "draft").length;
   const comparisonKey = comparisonKeys[selected?.id ?? ""] ?? comparisonKeys[selected?.id.replace(/-copy-.+$/, "") ?? ""] ?? "trend";
@@ -307,6 +402,46 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
       setDiscoveryError("Veille stratégie indisponible.");
     } finally {
       setDiscoveryBusy(false);
+    }
+  }
+
+  async function loadImprovements(force = false) {
+    setImprovementBusy(true);
+    setImprovementError("");
+    try {
+      const response = await fetch("/api/strategies/improvements", force ? {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "review", force: true }),
+      } : { cache: "no-store" });
+      const payload = await response.json() as StrategyImprovementPayload;
+      if (!payload.ok || !payload.state) throw new Error(payload.error || "improvements_unavailable");
+      setImprovements(payload.state);
+      if (force) setScanStatus("Revue Codex terminée. Les changements restent soumis à validation.");
+    } catch {
+      setImprovementError("Revue amélioration indisponible.");
+    } finally {
+      setImprovementBusy(false);
+    }
+  }
+
+  async function updateImprovementNote(noteId: string, action: "approve" | "dismiss") {
+    setImprovementBusy(true);
+    setImprovementError("");
+    try {
+      const response = await fetch("/api/strategies/improvements", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, noteId }),
+      });
+      const payload = await response.json() as StrategyImprovementPayload;
+      if (!payload.ok || !payload.state) throw new Error(payload.error || "improvement_update_failed");
+      setImprovements(payload.state);
+      setScanStatus(action === "approve" ? "Amélioration validée et appliquée au profil paper." : "Proposition ignorée.");
+    } catch {
+      setImprovementError(action === "approve" ? "Validation non enregistrée." : "Proposition non ignorée.");
+    } finally {
+      setImprovementBusy(false);
     }
   }
 
@@ -541,6 +676,16 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
         <KpiCard label="Veille" value={`${discovery.candidates.length}`} delta={`${draftCount} brouillons · ${activeCount} actives`} tone={discovery.candidates.length ? "ai" : "warning"} />
       </div>
 
+      <StrategyImprovementPanel
+        busy={improvementBusy}
+        error={improvementError}
+        notes={visibleImprovementNotes}
+        state={improvements}
+        onApprove={(noteId) => void updateImprovementNote(noteId, "approve")}
+        onDismiss={(noteId) => void updateImprovementNote(noteId, "dismiss")}
+        onReview={() => void loadImprovements(true)}
+      />
+
       <StrategyDiscoveryPanel
         assetsValue={candidateAssets}
         busy={discoveryBusy}
@@ -568,13 +713,18 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
       />
 
       <div className="mt-4 grid grid-cols-5 gap-3">
-        {visibleStrategies.length ? visibleStrategies.map((strategy) => (
+        {visibleStrategies.length ? visibleStrategies.map((strategy) => {
+          const improvement = improvementByStrategyId.get(strategy.id);
+          return (
           <GlassCard key={strategy.id} data-strategy-card-id={strategy.id} data-strategy-card-name={slug(strategy.name)} className={strategy.id === selected.id ? "border-sky-400/60" : ""}>
             <div className="flex items-start justify-between gap-3">
               <button type="button" onClick={() => setSelectedId(strategy.id)} className="min-w-0 flex-1 text-left">
                 <div className="truncate text-lg font-bold text-white">{strategy.name}</div>
                 <div className="mt-1 text-xs text-slate-400">{strategy.timeframe} · Risque <span className={strategy.risk === "Élevé" ? "text-red-300" : "text-amber-300"}>{strategy.risk}</span></div>
-                <div className="mt-2"><StatusBadge tone={statusTone(strategy.status)}>{strategy.status}</StatusBadge></div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <StatusBadge tone={statusTone(strategy.status)}>{strategy.status}</StatusBadge>
+                  {improvement ? <StatusBadge tone={improvement.status === "approved" ? "success" : "warning"}>{improvementStatusLabel(improvement.status)}</StatusBadge> : null}
+                </div>
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 <TogglePill active={strategy.status === "active"} onClick={() => void toggleStrategyStatus(strategy.id)} title="Activation enregistrée dans le runtime local" />
@@ -594,7 +744,8 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
             <div className="mt-1 min-h-4 truncate text-xs text-slate-500">{strategyWinRateEvidence(strategy)}</div>
             <Sparkline data={priceSeries.slice(-18)} color={strategy.id.includes("scalp") ? "#f59e0b" : strategy.id.includes("mean") ? "#a855f7" : "#22c55e"} />
           </GlassCard>
-        )) : (
+          );
+        }) : (
           <GlassCard className="col-span-5"><div className="text-sm text-slate-400">Aucune stratégie ne correspond aux filtres.</div></GlassCard>
         )}
       </div>
@@ -615,6 +766,33 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
           {actionsOpen ? (
             <div className="mb-4 rounded-2xl border border-sky-400/20 bg-sky-500/8 p-3 text-sm text-slate-300">
               Activations enregistrées côté runtime local. Les stratégies paper découvertes reprennent aussi les métriques du journal.
+            </div>
+          ) : null}
+          {selectedImprovement ? (
+            <div className="mb-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/8 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge tone={selectedImprovement.status === "approved" ? "success" : "warning"}>{improvementStatusLabel(selectedImprovement.status)}</StatusBadge>
+                    <StatusBadge tone={selectedImprovement.analysisProvider === "codex" ? "ai" : "neutral"}>{selectedImprovement.analysisProvider === "codex" ? "Codex" : "fallback"}</StatusBadge>
+                    <span className="text-sm font-semibold text-white">Note agent</span>
+                  </div>
+                  <div className="mt-2 text-sm leading-relaxed text-slate-300">{selectedImprovement.improvement}</div>
+                  {selectedImprovement.strategySpecificRules.length ? (
+                    <div className="mt-2 space-y-1">
+                      {selectedImprovement.strategySpecificRules.slice(0, 3).map((rule, index) => <div key={`${selectedImprovement.id}-selected-rule-${index}`} className="rounded-lg border border-sky-400/15 bg-sky-500/[0.05] px-2 py-1 text-xs leading-relaxed text-sky-100">{rule}</div>)}
+                    </div>
+                  ) : null}
+                </div>
+                {selectedImprovement.status === "proposed" ? (
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button size="sm" variant="success" onClick={() => void updateImprovementNote(selectedImprovement.id, "approve")} disabled={improvementBusy}><CheckCircle2 className="size-4" /> Valider</Button>
+                    <Button size="sm" variant="ghost" onClick={() => void updateImprovementNote(selectedImprovement.id, "dismiss")} disabled={improvementBusy}><XCircle className="size-4" /> Ignorer</Button>
+                  </div>
+                ) : (
+                  <StatusBadge tone="success">visible encore {selectedImprovement.remainingClosedTrades} trade(s) clos</StatusBadge>
+                )}
+              </div>
             </div>
           ) : null}
           <div className="grid grid-cols-2 gap-4">
@@ -640,6 +818,122 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
         </GlassCard>
       </div>
     </>
+  );
+}
+
+function StrategyImprovementPanel({
+  busy,
+  error,
+  notes,
+  state,
+  onApprove,
+  onDismiss,
+  onReview,
+}: {
+  busy: boolean;
+  error: string;
+  notes: StrategyImprovementNote[];
+  state: StrategyImprovementState;
+  onApprove: (noteId: string) => void;
+  onDismiss: (noteId: string) => void;
+  onReview: () => void;
+}) {
+  const proposedCount = notes.filter((note) => note.status === "proposed").length;
+  const approvedCount = notes.filter((note) => note.status === "approved").length;
+
+  return (
+    <GlassCard className="mt-4 border-emerald-400/25">
+      <CardTitle
+        title="Agent amélioration quotidien"
+        action={
+          <div className="flex flex-wrap gap-2">
+            <StatusBadge tone="neutral">revue · {dateOnlyLabel(state.lastReviewDate)}</StatusBadge>
+            <StatusBadge tone={proposedCount ? "warning" : "success"}>{proposedCount} à valider</StatusBadge>
+            <StatusBadge tone={approvedCount ? "success" : "neutral"}>{approvedCount} validée(s)</StatusBadge>
+            <Button size="sm" variant="success" onClick={onReview} disabled={busy}>
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCcw className="size-4" />}
+              Revoir avec Codex
+            </Button>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-[1fr_280px] gap-4">
+        <div className="space-y-3">
+          {notes.length ? notes.map((note) => (
+            <div key={note.id} data-strategy-improvement-note-id={note.id} className="rounded-xl border border-[#16314a] bg-white/[0.025] p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="truncate text-sm font-bold text-white">{note.strategyName}</div>
+                    <StatusBadge tone={note.status === "approved" ? "success" : "warning"}>{improvementStatusLabel(note.status)}</StatusBadge>
+                    <StatusBadge tone={note.analysisProvider === "codex" ? "ai" : "neutral"}>{note.analysisProvider === "codex" ? "Codex" : "fallback"}</StatusBadge>
+                    <StatusBadge tone="info">confiance {formatPercent(note.confidence, 0)}</StatusBadge>
+                  </div>
+                  <div className="mt-2 text-xs leading-relaxed text-slate-400">{note.reason}</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2 font-mono text-sm">
+                  <span className="text-red-300">{note.scoreBefore}</span>
+                  <span className="text-slate-500">→</span>
+                  <span className="text-emerald-300">{note.scoreAfter}</span>
+                </div>
+              </div>
+
+              <div className="mt-3 grid grid-cols-4 gap-2 text-xs">
+                <MetricChip label="Trades clos" value={`${note.before.closedTrades}/${note.before.totalTrades}`} />
+                <MetricChip label="Clôturés" value={formatPercent(note.before.closedTradeRatio, 0)} />
+                <MetricChip label="Win rate" value={formatPercent(note.before.winRate, 1)} />
+                <MetricChip label="P&L" value={signed(note.before.performance, "%")} />
+              </div>
+
+              <div className="mt-3 rounded-xl border border-emerald-400/15 bg-emerald-500/[0.06] p-3 text-sm leading-relaxed text-slate-200">
+                {note.improvement}
+              </div>
+              {note.strategySpecificRules.length ? (
+                <div className="mt-3 space-y-1 text-xs text-slate-400">
+                  {note.strategySpecificRules.map((rule, index) => <div key={`${note.id}-rule-${index}`} className="rounded-lg border border-white/10 bg-slate-950/45 px-2 py-1">{rule}</div>)}
+                </div>
+              ) : null}
+              <div className="mt-2 text-xs text-slate-500">{note.expectedImpact}</div>
+              {note.analysisError ? <div className="mt-2 text-xs text-amber-300">{note.analysisError}</div> : null}
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {note.status === "proposed" ? (
+                  <>
+                    <StatusBadge tone="warning">accord requis</StatusBadge>
+                    <Button size="sm" variant="success" onClick={() => onApprove(note.id)} disabled={busy}><CheckCircle2 className="size-4" /> Valider</Button>
+                    <Button size="sm" variant="ghost" onClick={() => onDismiss(note.id)} disabled={busy}><XCircle className="size-4" /> Ignorer</Button>
+                  </>
+                ) : (
+                  <>
+                    <StatusBadge tone="success">appliquée à {note.appliedAgentIds.length || 0} agent(s)</StatusBadge>
+                    <StatusBadge tone="info">visible encore {note.remainingClosedTrades} trade(s) clos</StatusBadge>
+                  </>
+                )}
+              </div>
+            </div>
+          )) : (
+            <div className="rounded-xl border border-dashed border-[#16314a] bg-slate-950/35 p-4 text-sm text-slate-400">
+              Aucune proposition active. Les stratégies restent en observation tant que l'échantillon est trop court ou que les résultats sont corrects.
+            </div>
+          )}
+          {error ? <StatusBadge tone="danger">{error}</StatusBadge> : null}
+        </div>
+
+        <div className="space-y-3 rounded-xl border border-[#16314a] bg-slate-950/45 p-3">
+          <div className="text-sm font-semibold text-white">Garde-fous</div>
+          <FieldRows rows={[
+            ["Trades clos min.", state.requirements.minClosedTrades],
+            ["Clôture min.", formatPercent(state.requirements.minClosedTradeRatio, 0)],
+            ["Pertes min.", state.requirements.minLosingTrades],
+            ["Note visible", `${state.requirements.expireAfterClosedTrades} trades clos`],
+          ]} />
+          <div className="text-xs leading-relaxed text-slate-500">
+            Les propositions ne modifient le profil paper qu'après validation.
+          </div>
+        </div>
+      </div>
+    </GlassCard>
   );
 }
 
@@ -876,6 +1170,16 @@ function statusTone(status: StrategyDefinition["status"]) {
   return "neutral";
 }
 
+function improvementStatusLabel(status: StrategyImprovementStatus) {
+  const labels: Record<StrategyImprovementStatus, string> = {
+    proposed: "à valider",
+    approved: "améliorée",
+    expired: "archivée",
+    dismissed: "ignorée",
+  };
+  return labels[status];
+}
+
 function stageTone(stage: StrategyDiscoveryStage) {
   if (stage === "live_candidate") return "success";
   if (stage === "paper_incubation") return "info";
@@ -967,6 +1271,15 @@ function dateLabel(iso?: string) {
   if (!iso) return "-";
   try {
     return new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "-";
+  }
+}
+
+function dateOnlyLabel(value?: string) {
+  if (!value) return "-";
+  try {
+    return new Date(`${value}T00:00:00`).toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
   } catch {
     return "-";
   }

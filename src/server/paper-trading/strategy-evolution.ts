@@ -103,6 +103,7 @@ function closedStats(positions: PaperPosition[]) {
 }
 
 export function evolveStrategyProfiles(state: PaperTradingState) {
+  const autoApply = process.env.STRATEGY_AUTO_EVOLUTION === "true";
   const profiles = normalizeStrategyProfiles(state);
   const updated: StrategyRuntimeProfile[] = [];
   const changes: Array<{ before: StrategyRuntimeProfile; after: StrategyRuntimeProfile; reason: string }> = [];
@@ -127,6 +128,20 @@ export function evolveStrategyProfiles(state: PaperTradingState) {
 
     if (profile.reviewCount >= stats.count) {
       next.rationale = `Attente d'un nouveau trade clôturé : ${stats.count} trade(s) déjà pris en compte.`;
+      updated.push(next);
+      continue;
+    }
+
+    if (!autoApply) {
+      const needsHumanReview = stats.winRate < 45 || stats.realized < 0 || state.metrics.disciplineScore < 70;
+      next = {
+        ...next,
+        reviewCount: stats.count,
+        updatedAt: new Date().toISOString(),
+        rationale: needsHumanReview
+          ? `Proposition requise : ${stats.count} trades clôturés, win rate ${stats.winRate}%, P&L ${stats.realized} $. Validation humaine obligatoire avant ajustement.`
+          : `Maintien : ${stats.count} trades clôturés, win rate ${stats.winRate}%, P&L ${stats.realized} $.`,
+      };
       updated.push(next);
       continue;
     }
