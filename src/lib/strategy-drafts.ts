@@ -83,3 +83,9 @@ export function writeLocalStrategyDraft(draft: StrategyDefinition) {
   window.localStorage.setItem(LOCAL_STRATEGY_DRAFTS_STORAGE_KEY, JSON.stringify(next));
   return next;
 }
+
+export function deleteLocalStrategyDraft(id: string) {
+  const next = readLocalStrategyDrafts().filter((draft) => draft.id !== id);
+  window.localStorage.setItem(LOCAL_STRATEGY_DRAFTS_STORAGE_KEY, JSON.stringify(next));
+  return next;
+}

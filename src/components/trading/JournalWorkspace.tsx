@@ -32,7 +32,19 @@ type Props = {
 
 type TradeView = "all" | "opened" | "not-opened";
 type ResultFilter = "all" | "win" | "loss" | "flat";
-type JournalView = "trades" | "dossier" | "niveaux" | "decisions" | "risque" | "lecon";
+type JournalView = "trades" | "dossier" | "niveaux" | "decisions" | "risque" | "lecon" | "apprentissage";
+type AgentLearningEntry = {
+  id: string;
+  agentId: string;
+  tradeId: string;
+  asset: string;
+  title: string;
+  detail: string;
+  lesson: string;
+  correctiveRule: string;
+  tone: "success" | "danger" | "warning" | "info" | "ai";
+  timestamp: number;
+};
 
 const durationLabel = "01:12:48";
 
@@ -58,6 +70,7 @@ export function JournalWorkspace({ trades, priceSeries, replaySteps, riskRules, 
   const exactEvents = useMemo(() => findTradeEvents(selected, paperEvents), [paperEvents, selected]);
   const decisionSteps = useMemo(() => buildDecisionSteps(selected, replaySteps, exactEvents), [exactEvents, selected, replaySteps]);
   const riskChecklist = useMemo(() => buildRiskChecklist(selected), [selected]);
+  const learningEntries = useMemo(() => buildAgentLearningEntries(trades, paperEvents), [paperEvents, trades]);
   const rr = selected ? rewardRiskRatio(selected) : 0;
   const activeRiskRules = riskRules.filter((rule) => rule.status === "active").slice(0, 5);
 
@@ -86,6 +99,14 @@ export function JournalWorkspace({ trades, priceSeries, replaySteps, riskRules, 
       linkedEvents: exactEvents,
       decisionSteps,
       riskChecklist,
+    });
+  }
+
+  function exportLearningJournal() {
+    downloadJson("journal-apprentissage-agents.json", {
+      generatedAt: new Date().toISOString(),
+      count: learningEntries.length,
+      entries: learningEntries,
     });
   }
 
@@ -141,6 +162,7 @@ export function JournalWorkspace({ trades, priceSeries, replaySteps, riskRules, 
       <JournalViewTabs
         decisionCount={decisionSteps.length}
         eventCount={exactEvents.length}
+        learningCount={learningEntries.length}
         selected={selected}
         tradeCount={visibleTrades.length}
         value={journalView}
@@ -305,6 +327,10 @@ export function JournalWorkspace({ trades, priceSeries, replaySteps, riskRules, 
             </div>
           </GlassCard>
         ) : null}
+
+        {journalView === "apprentissage" ? (
+          <AgentLearningJournal entries={learningEntries} onExport={exportLearningJournal} />
+        ) : null}
       </div>
     </>
   );
@@ -353,6 +379,129 @@ function countTradeViews(trades: Trade[]) {
 
 function uniqueValues(values: string[]) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function buildAgentLearningEntries(trades: Trade[], events: PaperTradingEvent[]): AgentLearningEntry[] {
+  const tradeEntries = trades.flatMap((trade) => learningSignalsForTrade(trade));
+  const eventEntries = events
+    .filter((event) => event.severity === "danger" || event.severity === "warning")
+    .map((event) => ({
+      id: `event-${event.id}`,
+      agentId: event.agentId,
+      tradeId: event.decisionId ?? event.id,
+      asset: event.pair,
+      title: event.severity === "danger" ? "Incident runtime" : "Alerte runtime",
+      detail: `${event.title} · ${event.detail}`,
+      lesson: event.detail,
+      correctiveRule: correctiveRuleForEvent(event),
+      tone: event.severity,
+      timestamp: new Date(event.timestamp).getTime(),
+    } satisfies AgentLearningEntry));
+  const seen = new Set<string>();
+
+  return [...tradeEntries, ...eventEntries]
+    .toSorted((a, b) => b.timestamp - a.timestamp)
+    .filter((entry) => {
+      const key = `${entry.agentId}:${entry.tradeId}:${entry.title}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function learningSignalsForTrade(trade: Trade): AgentLearningEntry[] {
+  const timestamp = tradeTimestampMs(trade);
+  const entries: Array<Omit<AgentLearningEntry, "id" | "agentId" | "tradeId" | "asset" | "timestamp"> & { key: string }> = [];
+
+  if (trade.pnl < 0) {
+    entries.push({
+      key: "loss",
+      title: "Perte clôturée",
+      detail: `${signed(trade.pnl, " $")} · ${trade.exitReason}`,
+      lesson: trade.lesson,
+      correctiveRule: correctiveRuleForTrade(trade, "loss"),
+      tone: "danger",
+    });
+  }
+
+  if (trade.status === "refused") {
+    entries.push({
+      key: "refused",
+      title: "Signal refusé",
+      detail: trade.initialReason,
+      lesson: trade.lesson,
+      correctiveRule: correctiveRuleForTrade(trade, "refused"),
+      tone: "warning",
+    });
+  }
+
+  if (trade.confidence < 60) {
+    entries.push({
+      key: "confidence",
+      title: "Confiance trop basse",
+      detail: `${trade.confidence}% · ${trade.initialReason}`,
+      lesson: trade.lesson,
+      correctiveRule: correctiveRuleForTrade(trade, "confidence"),
+      tone: "warning",
+    });
+  }
+
+  if (trade.disciplineScore < 80) {
+    entries.push({
+      key: "discipline",
+      title: "Discipline à renforcer",
+      detail: `${trade.disciplineScore}/100 · ${trade.tag}`,
+      lesson: trade.lesson,
+      correctiveRule: correctiveRuleForTrade(trade, "discipline"),
+      tone: "ai",
+    });
+  }
+
+  if (trade.riskPercent > 1) {
+    entries.push({
+      key: "risk",
+      title: "Risque trop élevé",
+      detail: `${formatPercent(trade.riskPercent, 2)} du capital`,
+      lesson: trade.lesson,
+      correctiveRule: correctiveRuleForTrade(trade, "risk"),
+      tone: "danger",
+    });
+  }
+
+  return entries.map((entry) => ({
+    id: `${trade.id}-${entry.key}`,
+    agentId: trade.agentId,
+    tradeId: trade.id,
+    asset: trade.asset,
+    title: entry.title,
+    detail: entry.detail,
+    lesson: entry.lesson,
+    correctiveRule: entry.correctiveRule,
+    tone: entry.tone,
+    timestamp,
+  }));
+}
+
+function tradeTimestampMs(trade: Trade) {
+  const [day = 1, month = 1, year = 1970] = trade.date.split("/").map((part) => Number(part));
+  const [hour = 0, minute = 0, second = 0] = trade.time.split(":").map((part) => Number(part));
+  const timestamp = new Date(year, month - 1, day, hour, minute, second).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function correctiveRuleForTrade(trade: Trade, type: "loss" | "refused" | "confidence" | "discipline" | "risk") {
+  if (type === "loss") return `Réduire exposition sur ${trade.asset} tant que la confluence n'est pas meilleure.`;
+  if (type === "refused") return "Conserver ce refus comme garde-fou et bloquer les signaux similaires.";
+  if (type === "confidence") return "Interdire l'ouverture sous 60 % de confiance sans validation humaine.";
+  if (type === "discipline") return "Ajouter une pause/revue si deux décisions faibles se répètent dans la session.";
+  return "Ramener le risque sous 1 % avant toute nouvelle entrée.";
+}
+
+function correctiveRuleForEvent(event: PaperTradingEvent) {
+  if (event.type === "risk_check") return "Durcir la règle de risque qui a déclenché cette alerte.";
+  if (event.type === "analysis_rejected") return "Marquer le signal comme contre-exemple pour l'analyste.";
+  if (event.type === "signal_ignored") return "Conserver le motif d'ignorance comme filtre de scan.";
+  return "Ajouter cet événement au dossier d'apprentissage avant le prochain cycle.";
 }
 
 function downloadJson(filename: string, payload: unknown) {
@@ -452,6 +601,7 @@ function SelectField({ label, value, onChange, options }: { label: string; value
 function JournalViewTabs({
   decisionCount,
   eventCount,
+  learningCount,
   selected,
   tradeCount,
   value,
@@ -459,6 +609,7 @@ function JournalViewTabs({
 }: {
   decisionCount: number;
   eventCount: number;
+  learningCount: number;
   selected: Trade;
   tradeCount: number;
   value: JournalView;
@@ -471,11 +622,12 @@ function JournalViewTabs({
     { value: "decisions", label: "Décisions", badge: `${decisionCount}`, icon: <Activity className="size-4" /> },
     { value: "risque", label: "Risque", badge: `${eventCount}`, icon: <Shield className="size-4" /> },
     { value: "lecon", label: "Leçon", badge: selected.disciplineScore >= 85 ? "OK" : "à revoir", icon: <BookOpenCheck className="size-4" /> },
+    { value: "apprentissage", label: "Apprentissage", badge: `${learningCount}`, icon: <BookOpenCheck className="size-4" /> },
   ];
 
   return (
     <div className="mt-4 overflow-x-auto rounded-2xl border border-[#16314a] bg-slate-950/40 p-1.5">
-      <div className="grid min-w-[760px] grid-cols-6 gap-1.5">
+      <div className="grid min-w-[980px] grid-cols-7 gap-1.5">
         {views.map((view) => {
           const active = view.value === value;
           return (
@@ -500,6 +652,94 @@ function JournalViewTabs({
       </div>
     </div>
   );
+}
+
+function AgentLearningJournal({ entries, onExport }: { entries: AgentLearningEntry[]; onExport: () => void }) {
+  const grouped = useMemo(() => groupLearningByAgent(entries), [entries]);
+  const criticalCount = entries.filter((entry) => entry.tone === "danger").length;
+  const warningCount = entries.filter((entry) => entry.tone === "warning").length;
+
+  return (
+    <div className="space-y-4">
+      <GlassCard>
+        <PanelTitle
+          icon={<BookOpenCheck className="size-5" />}
+          title="Journal d'apprentissage des agents"
+          action={<Button disabled={!entries.length} onClick={onExport} size="sm" variant="ghost"><Download className="size-4" /> Exporter</Button>}
+        />
+        <div className="grid gap-3 md:grid-cols-4">
+          <LearningStat label="Erreurs journalisées" value={`${entries.length}`} tone={entries.length ? "warning" : "success"} />
+          <LearningStat label="Critiques" value={`${criticalCount}`} tone={criticalCount ? "danger" : "success"} />
+          <LearningStat label="À surveiller" value={`${warningCount}`} tone={warningCount ? "warning" : "success"} />
+          <LearningStat label="Agents concernés" value={`${grouped.length}`} tone={grouped.length ? "ai" : "neutral"} />
+        </div>
+      </GlassCard>
+
+      {grouped.length ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {grouped.map((group) => (
+            <GlassCard key={group.agentId}>
+              <PanelTitle
+                title={group.agentId}
+                action={<StatusBadge tone={group.criticalCount ? "danger" : group.warningCount ? "warning" : "info"}>{group.entries.length} leçon(s)</StatusBadge>}
+              />
+              <div className="mb-4 grid gap-3 md:grid-cols-3">
+                <LearningStat label="Pertes/refus" value={`${group.criticalCount + group.warningCount}`} tone={group.criticalCount ? "danger" : "warning"} />
+                <LearningStat label="Actifs" value={`${group.assets.length}`} tone="info" />
+                <LearningStat label="Dernière erreur" value={group.latestLabel} tone="neutral" />
+              </div>
+              <Timeline
+                items={group.entries.slice(0, 5).map((entry) => ({
+                  title: entry.title,
+                  detail: `${entry.asset} · ${entry.detail} · règle: ${entry.correctiveRule}`,
+                  tone: entry.tone,
+                }))}
+              />
+            </GlassCard>
+          ))}
+        </div>
+      ) : (
+        <GlassCard>
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-4 text-sm text-emerald-100">
+            Aucun écart exploitable pour le moment. Dès qu'un agent perd, refuse un signal, baisse sous 60 % de confiance ou sort de discipline, une règle corrective apparaît ici.
+          </div>
+        </GlassCard>
+      )}
+    </div>
+  );
+}
+
+function LearningStat({ label, value, tone }: { label: string; value: string; tone: "success" | "danger" | "warning" | "info" | "ai" | "neutral" }) {
+  return (
+    <div className="rounded-2xl border border-[#16314a] bg-white/[0.025] p-3">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className="mt-1 flex items-center justify-between gap-3">
+        <div className="font-mono text-xl font-bold text-white">{value}</div>
+        <StatusBadge tone={tone}>{tone}</StatusBadge>
+      </div>
+    </div>
+  );
+}
+
+function groupLearningByAgent(entries: AgentLearningEntry[]) {
+  const grouped = new Map<string, AgentLearningEntry[]>();
+  entries.forEach((entry) => {
+    grouped.set(entry.agentId, [...(grouped.get(entry.agentId) ?? []), entry]);
+  });
+
+  return [...grouped.entries()]
+    .map(([agentId, agentEntries]) => {
+      const sorted = agentEntries.toSorted((a, b) => b.timestamp - a.timestamp);
+      return {
+        agentId,
+        entries: sorted,
+        assets: uniqueValues(sorted.map((entry) => entry.asset)),
+        criticalCount: sorted.filter((entry) => entry.tone === "danger").length,
+        warningCount: sorted.filter((entry) => entry.tone === "warning").length,
+        latestLabel: sorted[0] ? new Date(sorted[0].timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "-",
+      };
+    })
+    .toSorted((a, b) => b.criticalCount - a.criticalCount || b.warningCount - a.warningCount || b.entries.length - a.entries.length);
 }
 
 function SelectedTradeSummary({

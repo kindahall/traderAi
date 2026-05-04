@@ -3,7 +3,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Download, ExternalLink, LineChart, Loader2, Plus, RefreshCcw, Search, Sparkles, Telescope } from "lucide-react";
+import { Download, ExternalLink, LineChart, Loader2, Plus, RefreshCcw, Search, Sparkles, Telescope, Trash2 } from "lucide-react";
 import type { StrategyDefinition } from "@/data/runtime/strategies";
 import type { AppDataSnapshot } from "@/server/app-data";
 import { formatPercent, signed } from "@/lib/formatters";
@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { LocalAnalysisButton } from "@/components/analysis/LocalAnalysisButton";
 import { GlassCard, InfoHint, KpiCard, StatusBadge, Timeline, TogglePill } from "@/components/ui/dashboard";
 import { Donut, Sparkline } from "@/components/charts/charts";
-import { LOCAL_STRATEGY_DRAFTS_STORAGE_KEY, readLocalStrategyDrafts, writeLocalStrategyDraft } from "@/lib/strategy-drafts";
+import { deleteLocalStrategyDraft, LOCAL_STRATEGY_DRAFTS_STORAGE_KEY, readLocalStrategyDrafts, writeLocalStrategyDraft } from "@/lib/strategy-drafts";
 
 type Props = {
   strategies: StrategyDefinition[];
@@ -133,6 +133,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
   const [statusFilter, setStatusFilter] = useState<StrategyStatusFilter>("all");
   const [selectedId, setSelectedId] = useState(strategies[0]?.id ?? "");
   const [statusOverrides, setStatusOverrides] = useState<Record<string, StrategyDefinition["status"]>>({});
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
   const [localDrafts, setLocalDrafts] = useState<StrategyDefinition[]>([]);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [discovery, setDiscovery] = useState<StrategyDiscoveryState>(emptyDiscoveryState);
@@ -173,8 +174,10 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     [localDrafts, serverStrategyIds, serverStrategyNames],
   );
   const allStrategies = useMemo(
-    () => [...strategies, ...visibleLocalDrafts].map((strategy) => ({ ...strategy, status: statusOverrides[strategy.id] ?? strategy.status })),
-    [statusOverrides, strategies, visibleLocalDrafts],
+    () => [...strategies, ...visibleLocalDrafts]
+      .filter((strategy) => !deletedIds.has(strategy.id))
+      .map((strategy) => ({ ...strategy, status: statusOverrides[strategy.id] ?? strategy.status })),
+    [deletedIds, statusOverrides, strategies, visibleLocalDrafts],
   );
   const candidateDraftKeys = useMemo(
     () => new Set([...strategies, ...visibleLocalDrafts].map((strategy) => slug(strategy.name))),
@@ -223,6 +226,46 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
     } catch {
       setStatusOverrides((current) => ({ ...current, [strategyId]: strategy.status }));
       setDiscoveryError("Statut stratégie non enregistré.");
+    }
+  }
+
+  async function deleteStrategy(strategyId: string) {
+    const strategy = allStrategies.find((item) => item.id === strategyId);
+    if (!strategy) return;
+    const confirmed = window.confirm(`Supprimer "${strategy.name}" de la bibliothèque locale ? Cette action retire la stratégie du runtime local, mais ne passe aucun ordre.`);
+    if (!confirmed) return;
+
+    const nextSelectedId = allStrategies.find((item) => item.id !== strategyId)?.id ?? "";
+    setDeletedIds((current) => new Set([...current, strategyId]));
+    setSelectedId(nextSelectedId);
+    setDiscoveryError("");
+    setScanStatus(`${strategy.name} supprimée de la vue locale.`);
+
+    const localDraft = visibleLocalDrafts.find((item) => item.id === strategyId);
+    if (localDraft && !serverStrategyIds.has(strategyId)) {
+      setLocalDrafts(deleteLocalStrategyDraft(strategyId));
+      setScanStatus(`${strategy.name} supprimée des brouillons locaux.`);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/strategies/status", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: strategyId }),
+      });
+      const payload = await response.json() as { ok?: boolean; error?: string };
+      if (!response.ok || !payload.ok) throw new Error(payload.error || "strategy_delete_failed");
+      setScanStatus(`${strategy.name} supprimée du runtime local.`);
+    } catch {
+      setDeletedIds((current) => {
+        const next = new Set(current);
+        next.delete(strategyId);
+        return next;
+      });
+      setSelectedId(strategyId);
+      setDiscoveryError("Suppression stratégie non enregistrée.");
+      setScanStatus("");
     }
   }
 
@@ -533,7 +576,18 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
                 <div className="mt-1 text-xs text-slate-400">{strategy.timeframe} · Risque <span className={strategy.risk === "Élevé" ? "text-red-300" : "text-amber-300"}>{strategy.risk}</span></div>
                 <div className="mt-2"><StatusBadge tone={statusTone(strategy.status)}>{strategy.status}</StatusBadge></div>
               </button>
-              <TogglePill active={strategy.status === "active"} onClick={() => void toggleStrategyStatus(strategy.id)} title="Activation enregistrée dans le runtime local" />
+              <div className="flex shrink-0 items-center gap-2">
+                <TogglePill active={strategy.status === "active"} onClick={() => void toggleStrategyStatus(strategy.id)} title="Activation enregistrée dans le runtime local" />
+                <button
+                  aria-label={`Supprimer ${strategy.name}`}
+                  className="grid size-8 place-items-center rounded-lg border border-red-500/25 bg-red-500/8 text-red-200 transition hover:border-red-400/70 hover:bg-red-500/16"
+                  onClick={() => void deleteStrategy(strategy.id)}
+                  title="Supprimer la stratégie"
+                  type="button"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </div>
             </div>
             <div className="mt-4 text-sm text-slate-400">Win rate</div>
             <div className="font-mono text-xl text-emerald-300">{strategyWinRateLabel(strategy)}</div>
@@ -553,6 +607,7 @@ export function StrategiesWorkspace({ strategies, priceSeries, strategyCompariso
               <div className="flex flex-wrap gap-2">
                 <Button onClick={duplicateSelected} size="sm" variant="ghost">Dupliquer</Button>
                 <Button onClick={exportSelected} size="sm" variant="ghost"><Download className="size-4" /> Exporter</Button>
+                <Button onClick={() => void deleteStrategy(selected.id)} size="sm" variant="danger"><Trash2 className="size-4" /> Supprimer</Button>
                 <Button onClick={() => setActionsOpen((open) => !open)} size="sm" variant={actionsOpen ? "ai" : "ghost"}>Plus d'actions</Button>
               </div>
             }

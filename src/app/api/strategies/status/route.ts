@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { invalidateAppDataCache } from "@/server/app-data";
 import { guardSensitiveMutation } from "@/server/security/sensitive-api";
-import { updateStrategyLibraryStatus, type StrategyLibraryStatus } from "@/server/strategies/strategy-library-store";
+import { deleteStrategyLibraryItem, updateStrategyLibraryStatus, type StrategyLibraryStatus } from "@/server/strategies/strategy-library-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -9,6 +9,10 @@ export const runtime = "nodejs";
 type StrategyStatusRequest = {
   id?: string;
   status?: StrategyLibraryStatus;
+};
+
+type StrategyDeleteRequest = {
+  id?: string;
 };
 
 function isStrategyStatus(value: unknown): value is StrategyLibraryStatus {
@@ -25,6 +29,21 @@ export async function POST(request: Request) {
   }
 
   const state = await updateStrategyLibraryStatus(body.id, body.status);
+  invalidateAppDataCache();
+
+  return NextResponse.json({ ok: true, state });
+}
+
+export async function DELETE(request: Request) {
+  const blocked = guardSensitiveMutation(request, "strategy-delete");
+  if (blocked) return blocked;
+
+  const body = (await request.json().catch(() => ({}))) as StrategyDeleteRequest;
+  if (typeof body.id !== "string" || !body.id.trim()) {
+    return NextResponse.json({ ok: false, error: "invalid_strategy_delete" }, { status: 400 });
+  }
+
+  const state = await deleteStrategyLibraryItem(body.id);
   invalidateAppDataCache();
 
   return NextResponse.json({ ok: true, state });

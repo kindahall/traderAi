@@ -14,6 +14,9 @@ export type StrategyLibraryState = {
     status: StrategyLibraryStatus;
     updatedAt: string;
   }>;
+  deleted: Record<string, {
+    updatedAt: string;
+  }>;
 };
 
 const RUNTIME_DIR = path.join(process.cwd(), ".agent-trader-runtime");
@@ -28,6 +31,7 @@ function defaultState(): StrategyLibraryState {
     version: 1,
     updatedAt: nowIso(),
     overrides: {},
+    deleted: {},
   };
 }
 
@@ -39,7 +43,9 @@ function normalizeState(value: unknown): StrategyLibraryState {
   if (!value || typeof value !== "object") return defaultState();
   const input = value as Partial<StrategyLibraryState>;
   const overrides: StrategyLibraryState["overrides"] = {};
+  const deleted: StrategyLibraryState["deleted"] = {};
   const rawOverrides = input.overrides;
+  const rawDeleted = input.deleted;
 
   if (rawOverrides && typeof rawOverrides === "object") {
     Object.entries(rawOverrides).forEach(([id, override]) => {
@@ -53,10 +59,21 @@ function normalizeState(value: unknown): StrategyLibraryState {
     });
   }
 
+  if (rawDeleted && typeof rawDeleted === "object") {
+    Object.entries(rawDeleted).forEach(([id, value]) => {
+      if (!id) return;
+      const candidate = value && typeof value === "object" ? value as Partial<StrategyLibraryState["deleted"][string]> : {};
+      deleted[id] = {
+        updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : nowIso(),
+      };
+    });
+  }
+
   return {
     version: 1,
     updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : nowIso(),
     overrides,
+    deleted,
   };
 }
 
@@ -83,12 +100,34 @@ export async function updateStrategyLibraryStatus(id: string, status: StrategyLi
   const cleanId = id.trim();
   if (!cleanId || !isStrategyStatus(status)) return readStrategyLibraryState();
   const current = await readStrategyLibraryState();
+  const deleted = { ...current.deleted };
+  delete deleted[cleanId];
   return writeState({
     ...current,
+    deleted,
     overrides: {
       ...current.overrides,
       [cleanId]: {
         status,
+        updatedAt: nowIso(),
+      },
+    },
+  });
+}
+
+export async function deleteStrategyLibraryItem(id: string) {
+  const cleanId = id.trim();
+  if (!cleanId) return readStrategyLibraryState();
+  const current = await readStrategyLibraryState();
+  const overrides = { ...current.overrides };
+  delete overrides[cleanId];
+
+  return writeState({
+    ...current,
+    overrides,
+    deleted: {
+      ...current.deleted,
+      [cleanId]: {
         updatedAt: nowIso(),
       },
     },
@@ -223,7 +262,8 @@ function strategyFromDiscoveryCandidate(candidate: StrategyDiscoveryCandidate, s
 export async function buildStrategyLibrary(baseStrategies: StrategyDefinition[], paperState?: PaperTradingState) {
   const [library, discovery] = await Promise.all([readStrategyLibraryState(), readStrategyDiscoveryState()]);
   const byIdentity = new Set<string>();
-  const withOverrides = baseStrategies.map((strategy) => {
+  const deletedIds = new Set(Object.keys(library.deleted));
+  const withOverrides = baseStrategies.filter((strategy) => !deletedIds.has(strategy.id)).map((strategy) => {
     const paperStats = strategyPaperStats(strategy, paperState);
     const measured = paperStats.totalTrades > 0;
     const capitalUsd = Math.max(1, paperState?.capitalUsd ?? 10_000);
@@ -250,6 +290,7 @@ export async function buildStrategyLibrary(baseStrategies: StrategyDefinition[],
 
   const discoveryStrategies = discovery.candidates
     .filter(candidateIsLibraryStrategy)
+    .filter((candidate) => !deletedIds.has(discoveryStrategyId(candidate.id)))
     .map((candidate) => {
       const id = discoveryStrategyId(candidate.id);
       const status = library.overrides[id]?.status ?? paperStatusDefault(candidate);
