@@ -168,3 +168,7 @@ Cette application ne fournit pas de conseil financier. Les performances passées
 3. Persister les journaux d'usage LLM et les coûts retournés par les providers.
 4. Ajouter un connecteur OpenClaw externe : configuration Gateway, test de connexion, synchronisation agents, propositions structurées et logs.
 5. Ajouter Playwright sur les parcours critiques : LLM, marchés, risque, validation humaine.
+
+## Support
+
+If this project is useful to you, you can support its development with a free and entirely optional tip through the repository's **Sponsor** button. Thank you for your support.
